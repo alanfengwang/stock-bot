@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+pytest-cache-files-*/
+
+*.pyc
+*.pyo
+*.pyd
+
+.DS_Store
+
+virtual_account.json
+trade_log.csv
