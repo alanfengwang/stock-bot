@@ -12,55 +12,67 @@ from __future__ import annotations
 CASH_RESERVE_RATIO = 0.20
 
 ENTRY_SIZE_POLICY: dict[str, dict[str, float | str]] = {
-    # 广泛底仓：固定美元金额
+    # 广泛底仓：固定美元金额（分散小额）
     'micro_position': {
         'kind': 'fixed_cash',
-        'cash': 500.0,
+        'cash': 300.0,        # 每笔底仓 $300（原 $500）
         'risk_mult': 1.00,
     },
-    # 新仓：完整信号仓位
+    # 新仓：完整信号仓位，缩至 40%（分散优先）
     'golden_cross': {
         'kind': 'bucket_alloc',
-        'alloc_mult': 1.00,
-        'risk_mult': 1.00,
+        'alloc_mult': 0.40,   # 原 1.00 → 单笔更小
+        'risk_mult': 0.80,
     },
-    # 趋势中回踩确认：半仓到六成仓
+    # 趋势中回踩确认
     'trend_pullback': {
         'kind': 'bucket_alloc',
-        'alloc_mult': 0.60,
-        'risk_mult': 0.75,
+        'alloc_mult': 0.30,   # 原 0.60
+        'risk_mult': 0.70,
     },
-    # 突破追随：仓位略低于金叉，避免过度追高
+    # 突破追随
     'breakout': {
         'kind': 'bucket_alloc',
-        'alloc_mult': 0.80,
-        'risk_mult': 0.90,
+        'alloc_mult': 0.35,   # 原 0.80
+        'risk_mult': 0.80,
     },
-    # starter 仓位晋级：按目标仓位缺口补仓
+    # starter 仓位晋级
     'starter_promotion': {
         'kind': 'position_gap',
-        'alloc_mult': 0.60,
-        'position_mult': 1.00,
-        'risk_mult': 0.80,
+        'alloc_mult': 0.40,   # 原 0.60
+        'position_mult': 0.80,
+        'risk_mult': 0.70,
     },
-    # 常规加码：最多补当前持仓的一半
+    # 常规加码
     'add_position': {
         'kind': 'position_gap',
-        'alloc_mult': 0.50,
-        'position_mult': 0.50,
-        'risk_mult': 0.80,
+        'alloc_mult': 0.30,   # 原 0.50
+        'position_mult': 0.40,
+        'risk_mult': 0.70,
     },
-    # 蓝筹底仓：趋势确认直接建仓（高质量股不等信号）
+    # 蓝筹趋势底仓
     'uptrend': {
         'kind': 'bucket_alloc',
-        'alloc_mult': 1.00,
-        'risk_mult': 1.00,
+        'alloc_mult': 0.40,
+        'risk_mult': 0.80,
     },
-    # 热门赛道小仓位（低评分股，控制风险）
+    # 热门赛道小仓位
     'hot_sector': {
         'kind': 'bucket_alloc',
-        'alloc_mult': 0.40,
+        'alloc_mult': 0.20,
+        'risk_mult': 0.50,
+    },
+    # 盘前异动：小仓位试探
+    'premarket_gap': {
+        'kind': 'bucket_alloc',
+        'alloc_mult': 0.25,   # 盘前不确定性高，小仓
         'risk_mult': 0.60,
+    },
+    # 动量加速：趋势中积极跟进
+    'momentum_surge': {
+        'kind': 'bucket_alloc',
+        'alloc_mult': 0.50,   # 动量明确，半仓
+        'risk_mult': 0.90,
     },
     # 分批建仓 第二批（+5% 利润触发，占目标仓位约 30%）
     'pyramid_stage2': {
@@ -77,9 +89,12 @@ ENTRY_SIZE_POLICY: dict[str, dict[str, float | str]] = {
 }
 
 ENTRY_REASON_LABEL: dict[str, str] = {
-    'uptrend':      '趋势底仓',
-    'hot_sector':   '热门赛道',
-    'golden_cross': '金叉',
+    'weekly_dca': '每周定投',
+    'uptrend':        '趋势底仓',
+    'hot_sector':     '热门赛道',
+    'premarket_gap':  '盘前异动',
+    'momentum_surge': '动量加速',
+    'golden_cross':   '金叉',
     'trend_pullback': '回踩确认',
     'breakout': '突破',
     'starter_promotion': 'starter晋级',

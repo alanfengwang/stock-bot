@@ -194,3 +194,63 @@ def detect_entry_signal(cfg: dict,
                 return 'breakout', f"{lookback}bar突破 量比{volume_ratio:.1f}x"
 
     return None
+
+
+# ── 盘前异动信号 ───────────────────────────────────────────────
+def detect_premarket_signal(
+    snap_row: pd.Series,
+    min_gap_pct: float = 2.0,
+    min_pre_vol: int = 50_000,
+) -> tuple[str, str] | None:
+    """
+    盘前异动：盘前涨幅 ≥ min_gap_pct% 且成交量达到最低门槛 → 小仓跟进。
+    数据来自 moomoo get_market_snapshot 的 pre_change_rate / pre_volume。
+    """
+    try:
+        pre_chg = float(snap_row.get('pre_change_rate') or 0)
+        pre_vol = float(snap_row.get('pre_volume')      or 0)
+    except (TypeError, ValueError):
+        return None
+
+    if pre_chg < min_gap_pct:
+        return None
+    if pre_vol < min_pre_vol:
+        return None
+
+    return 'premarket_gap', f"盘前+{pre_chg:.1f}% 盘前量{pre_vol/1e4:.0f}万"
+
+
+# ── 动量加速信号 ───────────────────────────────────────────────
+def detect_momentum_surge(
+    df: pd.DataFrame,
+    fast_now: float,
+    slow_now: float,
+    vol_surge_mult: float = 2.0,
+    price_accel_pct: float = 0.5,
+) -> tuple[str, str] | None:
+    """
+    动量加速：uptrend 中量价齐升加速 → 不等回踩直接入场。
+
+    条件：
+      1. 快线 > 慢线（趋势确认）
+      2. 最新 K 线单根涨幅 ≥ price_accel_pct%
+      3. 当前成交量 ≥ vol_surge_mult × 20 根均量
+    """
+    if fast_now <= slow_now or len(df) < 22:
+        return None
+
+    prev_close = float(df.iloc[-2]['close'])
+    cur_close  = float(df.iloc[-1]['close'])
+    bar_chg    = (cur_close - prev_close) / prev_close * 100 if prev_close > 0 else 0
+
+    if bar_chg < price_accel_pct:
+        return None
+
+    vol_ma    = float(df['volume'].iloc[-21:-1].mean())
+    cur_vol   = float(df.iloc[-1].get('volume', 0))
+    vol_ratio = cur_vol / vol_ma if vol_ma > 0 else 0
+
+    if vol_ratio < vol_surge_mult:
+        return None
+
+    return 'momentum_surge', f"动量+{bar_chg:.1f}% 量{vol_ratio:.1f}x"

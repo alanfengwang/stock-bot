@@ -25,13 +25,31 @@ class LocalBroker:
                 'realized_pnl':     0.0,
                 'total_commission': 0.0,
                 'positions': {},
+                'meta': {
+                    'markers': {},
+                },
                 # positions[code] = {qty, avg_cost, bucket, entry_time}
             })
 
     # ── 内部 IO ────────────────────────────────────────────
+    def _normalize_state(self, state: dict) -> dict:
+        state.setdefault('initial_cash', 1_000_000.0)
+        state.setdefault('cash', state['initial_cash'])
+        state.setdefault('realized_pnl', 0.0)
+        state.setdefault('total_commission', 0.0)
+        state.setdefault('positions', {})
+        state.setdefault('meta', {})
+        state['meta'].setdefault('markers', {})
+
+        for pos in state['positions'].values():
+            pos.setdefault('add_count', 0)
+            pos.setdefault('profit_stages', [])
+            pos.setdefault('trail_high', pos.get('avg_cost', 0.0))
+        return state
+
     def _read(self) -> dict:
         with open(self.db_path) as f:
-            return json.load(f)
+            return self._normalize_state(json.load(f))
 
     def _write(self, state: dict):
         with open(self.db_path, 'w') as f:
@@ -46,6 +64,14 @@ class LocalBroker:
             w.writerow([time_key, code, bucket, side,
                         f'{price:.4f}', qty, reason,
                         f'{pnl:.2f}' if pnl is not None else ''])
+
+    def _parse_marker_time(self, value: str) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return None
 
     # ── 下单 ───────────────────────────────────────────────
     def place_order(self, code: str, side: str, qty: int, price: float,
@@ -114,6 +140,10 @@ class LocalBroker:
                 else:
                     p['qty'] -= sell_qty
 
+                markers = s.setdefault('meta', {}).setdefault('markers', {})
+                markers[f'last_sell_ts:{code}'] = now
+                markers[f'last_sell_reason:{code}'] = reason
+
                 self._write(s)
                 self._log(now, code, p.get('bucket', bucket), 'SELL',
                           price, sell_qty, reason, pnl)
@@ -129,6 +159,35 @@ class LocalBroker:
 
     def get_cash(self) -> float:
         return self.get_state()['cash']
+
+    def get_marker(self, key: str, default: str = '') -> str:
+        s = self.get_state()
+        return str(s.get('meta', {}).get('markers', {}).get(key, default))
+
+    def set_marker(self, key: str, value: str):
+        with self._lock:
+            s = self._read()
+            s.setdefault('meta', {}).setdefault('markers', {})[key] = value
+            self._write(s)
+
+    def was_sold_recently(
+        self,
+        code: str,
+        cooldown_minutes: int,
+        now: datetime | None = None,
+    ) -> bool:
+        if cooldown_minutes <= 0:
+            return False
+        marker = self.get_marker(f'last_sell_ts:{code}', '')
+        sold_at = self._parse_marker_time(marker)
+        if sold_at is None:
+            return False
+        current = now or datetime.now()
+        age_seconds = (current - sold_at).total_seconds()
+        return 0 <= age_seconds < cooldown_minutes * 60
+
+    def last_sell_reason(self, code: str) -> str:
+        return self.get_marker(f'last_sell_reason:{code}', '')
 
     def update_trail_high(self, code: str, high: float):
         """更新某只股票的移动止损高水位（持久化）。"""

@@ -2,21 +2,58 @@ import streamlit as st
 import pandas as pd
 import json, os, time
 from html import escape
-from datetime import datetime
+from datetime import datetime, timedelta
 from moomoo import OpenQuoteContext, RET_OK
 from typing import cast
 
+from discussion_universe import build_watch_universe, discussion_codes, load_discussion_universe
+from fundamental_model import score_slow_fundamentals
+from fundamental_store import load_fundamental_cache
 from market_utils import live_price_from_row
 from performance import calc_pnl_metrics
+from recurring_invest import current_new_york_time, week_marker
 from screener import fundamental_score, volume_signal
-from strategy_config import BUCKET_LABEL, BUCKET_ORDER, SECTOR_MAP, SECTOR_ORDER
+from strategy_config import (
+    BASE_WATCH_UNIVERSE,
+    BUCKET_LABEL,
+    BUCKET_ORDER,
+    DISCUSSION_WATCH_LIMIT,
+    SECTOR_MAP,
+    SECTOR_ORDER,
+    TRADE_UNIVERSE,
+    WEEKLY_DCA_MIN_HOUR_ET,
+    WEEKLY_DCA_PLAN,
+    WEEKLY_DCA_WEEKDAY_ET,
+)
 
-BASE      = os.path.dirname(__file__)
-BROKER_DB = os.path.join(BASE, 'virtual_account.json')
-LOG_FILE  = os.path.join(BASE, 'trade_log.csv')
-REFRESH   = 60
+BASE           = os.path.dirname(__file__)
+BROKER_DB      = os.path.join(BASE, 'virtual_account.json')
+LOG_FILE       = os.path.join(BASE, 'trade_log.csv')
+CUSTOM_WL_FILE = os.path.join(BASE, 'custom_watchlist.json')
+REFRESH        = 15
 
-ALL_STOCKS = list(SECTOR_MAP.keys())
+def _load_custom_wl() -> list[str]:
+    try:
+        with open(CUSTOM_WL_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+def _save_custom_wl(codes: list[str]):
+    with open(CUSTOM_WL_FILE, 'w') as f:
+        json.dump(sorted(set(codes)), f, indent=2)
+
+DISCUSSION_FEED = load_discussion_universe()
+DISCUSSION_UNIVERSE = discussion_codes(DISCUSSION_FEED, limit=200)
+_base_watch = build_watch_universe(
+    BASE_WATCH_UNIVERSE,
+    DISCUSSION_FEED,
+    extra_limit=DISCUSSION_WATCH_LIMIT,
+)
+# 合并自选股（文件在 sidebar 初始化之前先读一次）
+_custom_init = _load_custom_wl() if os.path.exists(CUSTOM_WL_FILE) else []
+WATCH_UNIVERSE = sorted(set(_base_watch) | set(_custom_init))
+ALL_STOCKS = WATCH_UNIVERSE
 
 # ── 页面配置 ─────────────────────────────────────────────────
 st.set_page_config(page_title="Portfolio Bot", layout="wide", page_icon="📈")
@@ -25,15 +62,65 @@ st.set_page_config(page_title="Portfolio Bot", layout="wide", page_icon="📈")
 if 'dark_mode' not in st.session_state:
     st.session_state.dark_mode = False
 
+if 'custom_wl' not in st.session_state:
+    st.session_state.custom_wl = _load_custom_wl()
+
 with st.sidebar:
     st.markdown("### ⚙️ 设置")
     dark_val = st.toggle("🌙 深色模式", value=st.session_state.dark_mode)
     if dark_val != st.session_state.dark_mode:
         st.session_state.dark_mode = dark_val
         st.rerun()
-    st.caption("每 60 秒自动刷新")
+    st.caption(f"每 {REFRESH} 秒自动刷新")
+    st.divider()
+
+    # ── 自选股添加 ────────────────────────────────────────
+    st.markdown("#### 📌 添加自选股")
+    _input = st.text_input(
+        "输入股票代码（如 AAPL）",
+        placeholder="NVDA / TSLA / ASTS ...",
+        key="wl_input",
+        label_visibility="collapsed",
+    )
+    col_add, col_clear = st.columns([1, 1])
+    with col_add:
+        if st.button("➕ 添加", use_container_width=True):
+            raw = _input.strip().upper()
+            codes_to_add = [c.strip() for c in raw.replace(',', ' ').split() if c.strip()]
+            added = []
+            for code in codes_to_add:
+                full = f"US.{code}" if not code.startswith("US.") else code
+                if full not in st.session_state.custom_wl:
+                    st.session_state.custom_wl.append(full)
+                    added.append(code)
+            if added:
+                _save_custom_wl(st.session_state.custom_wl)
+                st.success(f"已添加：{', '.join(added)}")
+                st.rerun()
+
+    # 显示当前自选股，可逐个删除
+    if st.session_state.custom_wl:
+        st.markdown(f"**自选股（{len(st.session_state.custom_wl)} 只）**")
+        for code in list(st.session_state.custom_wl):
+            label = code.replace("US.", "")
+            c1, c2 = st.columns([3, 1])
+            c1.markdown(f"`{label}`")
+            if c2.button("✕", key=f"rm_{code}"):
+                st.session_state.custom_wl.remove(code)
+                _save_custom_wl(st.session_state.custom_wl)
+                st.rerun()
+    with col_clear:
+        if st.session_state.custom_wl and st.button("🗑 清空", use_container_width=True):
+            st.session_state.custom_wl = []
+            _save_custom_wl([])
+            st.rerun()
+
     st.divider()
     st.caption(f"行情来源：Moomoo OpenD\n交易：本地虚拟撮合")
+    st.caption(
+        f"观察池 {len(WATCH_UNIVERSE)} 只  |  可交易池 {len(TRADE_UNIVERSE)} 只"
+        f"  |  讨论池 {len(DISCUSSION_UNIVERSE)} 只"
+    )
 
 DARK = st.session_state.dark_mode
 
@@ -121,7 +208,7 @@ section[data-testid="stSidebar"] small {{
 .hero-num   {{ font-size:1.1rem; font-weight:700; }}
 .hero-lbl   {{ font-size:.7rem; color:{TEXT2}; margin-top:2px; }}
 
-.kpi-grid {{ display:grid; grid-template-columns:repeat(5,1fr); gap:10px; margin-bottom:20px; }}
+.kpi-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:10px; margin-bottom:20px; }}
 .kpi {{
     background:{KPI_BG}; border:1px solid {KPI_BOR};
     border-radius:14px; padding:18px 20px; transition:border-color .15s;
@@ -130,6 +217,7 @@ section[data-testid="stSidebar"] small {{
 .kpi-label  {{ font-size:.65rem; color:{TEXT2}; text-transform:uppercase; letter-spacing:.08em; }}
 .kpi-value  {{ font-size:1.4rem; font-weight:700; color:{KPI_VAL}; margin:5px 0 2px; line-height:1; }}
 .kpi-sub    {{ font-size:.72rem; color:{TEXT2}; }}
+.kpi-subline {{ font-size:.72rem; color:{TEXT2}; margin-top:4px; line-height:1.35; }}
 
 .badge {{
     display:inline-flex; align-items:center; white-space:nowrap;
@@ -259,6 +347,99 @@ def load_trades() -> pd.DataFrame:
     df['pnl']   = pd.to_numeric(df['pnl'],   errors='coerce')
     return df
 
+
+@st.cache_data(ttl=1800)
+def load_slow_fundamentals() -> dict:
+    return load_fundamental_cache()
+
+
+def format_dual_time(dt: datetime) -> str:
+    local_dt = dt.astimezone()
+    return (
+        f"{dt.strftime('%Y-%m-%d %H:%M %Z')}"
+        f" / {local_dt.strftime('%Y-%m-%d %H:%M %Z')}"
+    )
+
+
+def next_weekly_window(now_et: datetime, is_complete: bool) -> tuple[datetime | None, bool]:
+    days_ahead = (WEEKLY_DCA_WEEKDAY_ET - now_et.weekday()) % 7
+    candidate = (now_et + timedelta(days=days_ahead)).replace(
+        hour=WEEKLY_DCA_MIN_HOUR_ET,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+
+    due_now = (
+        now_et.weekday() == WEEKLY_DCA_WEEKDAY_ET
+        and now_et >= candidate
+        and not is_complete
+    )
+    if due_now:
+        return None, True
+
+    if days_ahead == 0 and now_et >= candidate:
+        candidate += timedelta(days=7)
+    return candidate, False
+
+
+def weekly_dca_status(account: dict, trades: pd.DataFrame) -> dict:
+    plan_codes = list(WEEKLY_DCA_PLAN.keys())
+    markers = account.get('meta', {}).get('markers', {})
+    now_et = current_new_york_time()
+    this_week = week_marker(now_et)
+
+    done_codes = [
+        code for code in plan_codes
+        if markers.get(f'weekly_dca:{code}', '') == this_week
+    ]
+    done_count = len(done_codes)
+    total_count = len(plan_codes)
+    is_complete = total_count > 0 and done_count == total_count
+    next_run_et, due_now = next_weekly_window(now_et, is_complete)
+
+    dca_trades = trades[
+        trades['reason'].eq('weekly_dca')
+        & trades['side'].eq('BUY')
+        & trades['stock'].isin(plan_codes)
+    ].copy()
+    if not dca_trades.empty:
+        dca_trades['time_dt'] = pd.to_datetime(dca_trades['time'], errors='coerce')
+
+    last_price_parts = []
+    for code in plan_codes:
+        code_trades = dca_trades[dca_trades['stock'] == code] if not dca_trades.empty else pd.DataFrame()
+        if code_trades.empty:
+            last_price_parts.append(f"{code.replace('US.', '')} —")
+            continue
+        latest = code_trades.sort_values('time_dt').iloc[-1]
+        last_price_parts.append(f"{code.replace('US.', '')} ${float(latest['price']):.2f}")
+
+    if total_count == 0:
+        status_text = '未配置'
+        status_class = 'flat'
+        next_run_text = '—'
+    elif is_complete:
+        status_text = f"已完成 {done_count}/{total_count}"
+        status_class = 'up'
+        next_run_text = format_dual_time(cast(datetime, next_run_et)) if next_run_et else '—'
+    elif due_now:
+        status_text = f"待执行 {done_count}/{total_count}"
+        status_class = 'warn'
+        next_run_text = '本周窗口已打开，当前可执行'
+    else:
+        status_text = f"未完成 {done_count}/{total_count}"
+        status_class = 'warn'
+        next_run_text = format_dual_time(cast(datetime, next_run_et)) if next_run_et else '—'
+
+    return {
+        'status_text': status_text,
+        'status_class': status_class,
+        'next_run_text': next_run_text,
+        'last_price_text': ' / '.join(last_price_parts) if last_price_parts else '—',
+        'done_codes_text': ' / '.join(code.replace('US.', '') for code in done_codes) if done_codes else '本周尚未成交',
+    }
+
 # ── 技术指标 ─────────────────────────────────────────────────
 
 def calc_rsi(s, n=14):
@@ -315,7 +496,9 @@ account   = load_account()
 trades    = load_trades()
 prices    = load_prices(tuple(ALL_STOCKS))
 klines    = load_klines(tuple(ALL_STOCKS))
+slow_fund_cache = load_slow_fundamentals()
 positions = account.get('positions', {})
+dca_status = weekly_dca_status(account, trades)
 
 mkt_val = unrealized = today_pnl = 0.0
 pos_rows = []
@@ -380,6 +563,9 @@ real  = account['realized_pnl']
 comm  = account['total_commission']
 t_ret = (total - init) / init * 100
 t_pct = today_pnl / (total - today_pnl) * 100 if total != today_pnl else 0
+trade_count = len(trades)
+buy_count = int(trades['side'].eq('BUY').sum()) if 'side' in trades.columns else 0
+sell_count = int(trades['side'].eq('SELL').sum()) if 'side' in trades.columns else 0
 
 # ══════════════════════════════════════════════════════════
 # 顶部英雄区域
@@ -437,6 +623,18 @@ st.markdown(f"""
     <div class="kpi-value">${comm:.2f}</div>
     <div class="kpi-sub">{pd.Timestamp.now().strftime('%H:%M:%S')} 刷新</div>
   </div>
+  <div class="kpi">
+    <div class="kpi-label">本周定投状态</div>
+    <div class="kpi-value {dca_status['status_class']}">{dca_status['status_text']}</div>
+    <div class="kpi-subline">下次执行：{dca_status['next_run_text']}</div>
+    <div class="kpi-subline">已完成：{dca_status['done_codes_text']}</div>
+    <div class="kpi-subline">上次成交价：{dca_status['last_price_text']}</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">交易次数</div>
+    <div class="kpi-value">{trade_count}</div>
+    <div class="kpi-sub">买入 {buy_count} · 卖出 {sell_count}</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -448,6 +646,21 @@ t1, t2, t3, t4, t5 = st.tabs(["💼 持仓", "🔍 自选股雷达", "📈 盈�
 PNL_COLS  = ['未实现盈亏','收益率%','今日盈亏','今日%']
 BASE_COLS = ['股票','板块','策略','数量','成本价','现价','市值',
              '未实现盈亏','收益率%','今日盈亏','今日%','持仓天数']
+HOLDING_SORT_OPTIONS = {
+    '默认顺序': None,
+    '总市值': '市值',
+    '单股股价': '现价',
+    '成本价': '成本价',
+    '持仓数量': '数量',
+    '未实现盈亏': '未实现盈亏',
+    '收益率': '收益率%',
+    '今日盈亏': '今日盈亏',
+    '今日涨跌幅': '今日%',
+    '持仓天数': '持仓天数',
+    '股票代码': '股票',
+    '板块': '板块',
+    '策略': '策略',
+}
 FMT = {
     '成本价':   '${:.2f}', '现价':    '${:.2f}', '市值':   '${:,.0f}',
     '未实现盈亏':'${:+,.2f}','收益率%':'{:+.2f}%',
@@ -481,8 +694,24 @@ def cell_color(col, val):
         pass
     return ''
 
-def make_table(rows, extra_cols=None):
+def sort_rows(rows, sort_col=None, descending=True):
+    if not rows or not sort_col:
+        return list(rows)
+
+    def _sort_key(row):
+        val = row.get(sort_col)
+        if val is None:
+            return (1, 0)
+        if isinstance(val, str):
+            return (0, val.lower())
+        return (0, val)
+
+    return sorted(rows, key=_sort_key, reverse=descending)
+
+
+def make_table(rows, extra_cols=None, sort_col=None, descending=True):
     """生成完全受主题控制的 HTML 表格（不依赖 st.dataframe）。"""
+    rows = sort_rows(rows, sort_col=sort_col, descending=descending)
     all_cols  = list(dict.fromkeys(BASE_COLS + (extra_cols or [])))
     avail     = [c for c in all_cols if any(c in r for r in rows)]
 
@@ -541,11 +770,33 @@ with t1:
     if not pos_rows:
         st.info("当前空仓，策略运行中等待信号…")
     else:
+        sort_c1, sort_c2 = st.columns([2, 1])
+        with sort_c1:
+            holding_sort_label = st.selectbox(
+                "排序字段",
+                list(HOLDING_SORT_OPTIONS.keys()),
+                index=0,
+                key="holding_sort_label",
+            )
+        with sort_c2:
+            holding_sort_desc = st.selectbox(
+                "排序方向",
+                ["从高到低", "从低到高"],
+                index=0,
+                key="holding_sort_direction",
+            )
+
+        holding_sort_col = HOLDING_SORT_OPTIONS[holding_sort_label]
+        holding_sort_desc_flag = holding_sort_desc == "从高到低"
         views = st.tabs(["🗂 全览", "📂 按策略桶", "🏭 按行业板块", "⏱ 按持仓时间", "📊 按表现"])
 
         # ── 视角0：全览（默认第一个）──────────────────────
         with views[0]:
-            make_table(pos_rows)
+            make_table(
+                pos_rows,
+                sort_col=holding_sort_col,
+                descending=holding_sort_desc_flag,
+            )
 
         # ── 视角1：策略桶 ──────────────────────────────────
         with views[1]:
@@ -564,7 +815,11 @@ with t1:
                   <span class="group-meta {c}">未实现 {s(bk_unr)}${abs(bk_unr):,.0f}</span>
                   <span class="group-meta {'up' if bk_t>=0 else 'down'}">今日 {s(bk_t)}${abs(bk_t):,.0f}</span>
                 </div>""", unsafe_allow_html=True)
-                make_table(rows)
+                make_table(
+                    rows,
+                    sort_col=holding_sort_col,
+                    descending=holding_sort_desc_flag,
+                )
 
         # ── 视角2：行业板块 ────────────────────────────────
         with views[2]:
@@ -582,7 +837,11 @@ with t1:
                   <span class="group-meta">{len(rows)} 只</span>
                   <span class="group-meta {c}">未实现 {s(sec_unr)}${abs(sec_unr):,.0f}</span>
                 </div>""", unsafe_allow_html=True)
-                make_table(rows)
+                make_table(
+                    rows,
+                    sort_col=holding_sort_col,
+                    descending=holding_sort_desc_flag,
+                )
 
         # ── 视角3：持仓时间 ────────────────────────────────
         with views[3]:
@@ -598,7 +857,12 @@ with t1:
                   <span class="group-meta">{len(rows)} 只</span>
                   <span class="group-meta {c}">未实现 {s(hz_unr)}${abs(hz_unr):,.0f}</span>
                 </div>""", unsafe_allow_html=True)
-                make_table(rows, ['持仓天数','加码次数'])
+                make_table(
+                    rows,
+                    ['持仓天数','加码次数'],
+                    sort_col=holding_sort_col,
+                    descending=holding_sort_desc_flag,
+                )
 
         # ── 视角4：按表现 ──────────────────────────────────
         with views[4]:
@@ -614,7 +878,11 @@ with t1:
                   <span class="group-meta">{len(rows)} 只</span>
                   <span class="group-meta {c}">{s(st_unr)}${abs(st_unr):,.0f}</span>
                 </div>""", unsafe_allow_html=True)
-                make_table(rows)
+                make_table(
+                    rows,
+                    sort_col=holding_sort_col,
+                    descending=holding_sort_desc_flag,
+                )
 
 # ── Tab 2：自选股雷达 ─────────────────────────────────────────
 with t2:
@@ -634,6 +902,14 @@ with t2:
         snap = pd.Series({'pe_ttm_ratio':px.get('pe',0),'earning_per_share':px.get('eps',0),
                            'pb_ratio':0,'total_market_val':px.get('mkt_cap',0)})
         fund_sc, notes = fundamental_score(snap)
+        slow_eval = score_slow_fundamentals(
+            stock,
+            SECTOR_MAP.get(stock, ''),
+            slow_fund_cache.get(stock),
+            snapshot=snap,
+        )
+        slow_sc = slow_eval['score'] if slow_eval['available'] else None
+        fund_score_display = round((slow_sc / 10.0), 1) if slow_sc is not None else round(fund_sc, 1)
 
         df_k   = klines.get(stock)
         mom_v  = mom20(df_k['close'])*100   if df_k is not None else 0
@@ -644,7 +920,7 @@ with t2:
         w52    = (last-l52)/(h52-l52)*100 if h52>l52 else 50
         pos_sc = max(0, 10-abs(w52-50)*0.15)
         mom_sc = max(0, min(10, 5+mom_v*0.3))
-        score  = round(fund_sc*0.40 + mom_sc*0.35 + pos_sc*0.25, 1)
+        score  = round(fund_score_display*0.40 + mom_sc*0.35 + pos_sc*0.25, 1)
 
         sig = '—'
         if rsi_v == rsi_v:
@@ -661,7 +937,8 @@ with t2:
             '今日%':   d_chg,
             '盘前%':   px.get('pre_chg',0) if px.get('pre_p') else None,
             '评分':    score,
-            '基本面':  round(fund_sc,1),
+            '基本面':  fund_score_display,
+            '慢分':    round(slow_sc,1) if slow_sc is not None else None,
             '动量20d': mom_v,
             'RSI':     rsi_v if rsi_v==rsi_v else None,
             '信号':    sig,
@@ -675,12 +952,13 @@ with t2:
                   .format({'现价':'${:.2f}',
                            '今日%':   lambda x: f'{x:+.2f}%' if pd.notna(x) else '—',
                            '盘前%':   lambda x: f'{x:+.2f}%' if pd.notna(x) else '—',
+                           '慢分':    lambda x: f'{x:.0f}' if pd.notna(x) else '—',
                            '动量20d': '{:+.1f}%',
                            'RSI':     lambda x: f'{x:.0f}'   if pd.notna(x) else '—'})
                   .map(color_pnl,   subset=['今日%','盘前%','动量20d'])
                   .map(color_score, subset=['评分'])
                   .map(color_rsi,   subset=['RSI']))
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(styled, width="stretch", hide_index=True)
         st.caption("● 已持仓  |  评分 🟢≥7.5 🟡6-7.5 🔴<4.5  |  RSI 🟢≤30超卖 🔴≥70超买")
 
 # ── Tab 3：盈亏曲线 ──────────────────────────────────────────
@@ -703,13 +981,13 @@ with t3:
             bp.columns = ['策略','盈亏']
             st.dataframe(bp.style.format({'盈亏':'${:+,.2f}'})
                            .map(color_pnl, subset=['盈亏']),
-                         use_container_width=True, hide_index=True)
+                         width="stretch", hide_index=True)
             if pos_rows:
                 st.subheader("持仓盈亏")
                 ur = pd.DataFrame([{'股票':r['股票'],'未实现':r['_unr']} for r in pos_rows])
                 st.dataframe(ur.style.format({'未实现':'${:+,.2f}'})
                                .map(color_pnl, subset=['未实现']),
-                             use_container_width=True, hide_index=True)
+                             width="stretch", hide_index=True)
 
 # ── Tab 4：交易记录 ──────────────────────────────────────────
 with t4:
@@ -719,6 +997,7 @@ with t4:
         disp = trades.copy().iloc[::-1].reset_index(drop=True)
         disp['side']   = disp['side'].map({'BUY':'🟢 买入','SELL':'🔴 卖出'}).fillna(disp['side'])
         disp['reason'] = disp['reason'].map({
+            'weekly_dca':'每周定投',
             'golden_cross':'金叉','trend_pullback':'回踩确认','breakout':'突破',
             'death_cross':'死叉','stop_loss':'止损','trailing_stop':'移动止损',
             'rsi_overbought':'RSI超买','partial_profit':'分批止盈',
@@ -739,7 +1018,7 @@ with t4:
         st.dataframe(
             disp_show.style
                 .map(color_pnl, subset=['盈亏']),
-            use_container_width=True, hide_index=True)
+            width="stretch", hide_index=True)
         st.divider()
         wins  = (sells['pnl']>0).sum() if not sells.empty else 0
         losses= (sells['pnl']<=0).sum() if not sells.empty else 0
@@ -808,7 +1087,7 @@ with t5:
                         '均亏': f"${sum(p for p in bpnls if p<=0)/max(1,len([p for p in bpnls if p<=0])):+.0f}" if any(p<=0 for p in bpnls) else '—',
                     })
                 bk_df = pd.DataFrame(bk_stats)
-                st.dataframe(bk_df, use_container_width=True, hide_index=True)
+                st.dataframe(bk_df, width="stretch", hide_index=True)
 
         st.divider()
         st.subheader("月度盈亏")

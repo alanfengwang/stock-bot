@@ -28,6 +28,7 @@ from local_broker import LocalBroker
 from market_utils import live_price_from_row
 from micro_portfolio import score_snapshot_row, select_diversified_micro_candidates
 from strategy_config import (
+    MICRO_REENTRY_COOLDOWN_MINUTES,
     MICRO_ALLOC,
     MICRO_MAX_POS,
     MICRO_MIN_POS,
@@ -125,6 +126,10 @@ def main():
         sector_caps=MICRO_SECTOR_CAP_OVERRIDES,
         required_sectors=MICRO_REQUIRED_SECTORS,
     )
+    diversified = [
+        row for row in diversified
+        if not broker.was_sold_recently(row['code'], MICRO_REENTRY_COOLDOWN_MINUTES)
+    ]
     diversified_codes = {row['code']: row for row in diversified}
 
     for sector, stocks in UNIVERSE.items():
@@ -178,6 +183,8 @@ def main():
         for c, sc in other:
             price = price_map.get(c, 0.0)
             note = '分散优先'
+            if broker.was_sold_recently(c, MICRO_REENTRY_COOLDOWN_MINUTES):
+                note = '卖出后冷静期'
             if price > MICRO_ALLOC:
                 note = '单价高于底仓预算'
             print(f"  {sector:<10} {c.replace('US.',''):<8} {sc:>5.1f}  ${price:>7.2f}  {'跳过':>6}  {note}")

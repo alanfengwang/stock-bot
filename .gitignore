@@ -10,3 +10,5 @@ pytest-cache-files-*/
 
 virtual_account.json
 trade_log.csv
+fundamental_cache.json
+sec_ticker_map.json

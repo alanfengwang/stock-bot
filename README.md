@@ -25,6 +25,18 @@
 - [trade_costs.py](/Users/apple/Documents/Stock/trade_costs.py:1): 手续费与滑点模型。
 - [performance.py](/Users/apple/Documents/Stock/performance.py:1): 胜率、利润因子、回撤、Sharpe 等绩效指标。
 - [market_utils.py](/Users/apple/Documents/Stock/market_utils.py:1): 实时价格与行情请求小工具。
+- [fundamental_store.py](/Users/apple/Documents/Stock/fundamental_store.py:1): 基于 SEC companyfacts 的日更慢速基本面缓存。
+- [fundamental_model.py](/Users/apple/Documents/Stock/fundamental_model.py:1): 分行业模板的慢速基本面评分模型。
+- [exit_rules.py](/Users/apple/Documents/Stock/exit_rules.py:1): 时间止损、保本线、移动止损激活等退出规则。
+- [discussion_universe.py](/Users/apple/Documents/Stock/discussion_universe.py:1): 讨论热度股票池加载与解析。
+- [refresh_discussion_universe.py](/Users/apple/Documents/Stock/refresh_discussion_universe.py:1): 刷新当前 Reddit / WSB 热门前 200 股票。
+
+股票池结构：
+
+- `WATCH_UNIVERSE`: 更大的研究/雷达观察池，给评分、dashboard 和动态筛选使用。
+- `TRADE_UNIVERSE`: 更小的可交易池，限制 bot 实际可能下单的范围。
+- `DISCUSSION_UNIVERSE`: 由外部讨论热度源生成的研究清单，默认不直接并入实时交易池。
+- 当前 live 端做法是：先对 `WATCH_UNIVERSE` 打分，再只在各桶自己的交易名单里执行信号。
 
 ## Strategy Summary
 
@@ -44,9 +56,23 @@
 卖出规则：
 
 - 固定止损
-- 移动止损
+- 盈利后才激活的移动止损
+- 短线时间止损与保本线
 - 死叉/超买
 - 盈利到阈值后的分批止盈
+
+慢速基本面层：
+
+- 每日拉取 `SEC companyfacts`，缓存到本地 `fundamental_cache.json`
+- 优先使用慢速基本面分做质量过滤和仓位分层
+- snapshot 基本面 (`EPS / PE / PB / 市值`) 仅做兜底
+- ETF (`QQQ / VOO / SPY / IWM / VTI`) 不走公司基本面深评，按被动配置模板处理
+
+讨论热度股票池：
+
+- 当前来源是 `ApeWisdom / r/wallstreetbets` 为主，缺口由 `r/stocks` 补齐到前 200
+- 结果保存到本地 `discussion_universe.json`
+- 用途定位为研究/观察，不默认推入 bot 的实时可交易名单
 
 ## Backtest Notes
 
@@ -62,6 +88,8 @@
 ```bash
 python3 build_micro.py
 python3 build_micro.py --execute
+python3 refresh_fundamentals.py
+python3 refresh_discussion_universe.py
 python3 portfolio_bot.py
 python3 backtest.py
 streamlit run dashboard.py
@@ -70,5 +98,5 @@ streamlit run dashboard.py
 ## Tests
 
 ```bash
-python3 -m unittest test_execution_policy.py test_trade_costs.py test_performance.py test_strategy_signals.py
+python3 -m unittest test_execution_policy.py test_trade_costs.py test_performance.py test_strategy_signals.py test_strategy_universe.py test_fundamental_model.py test_fundamental_store.py test_exit_rules.py test_discussion_universe.py
 ```

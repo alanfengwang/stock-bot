@@ -11,10 +11,19 @@ from execution_policy import (
     entry_budget,
     is_starter_position,
 )
+from exit_rules import evaluate_trailing_stop, holding_days, should_time_stop
+from fundamental_model import score_slow_fundamentals
+from fundamental_store import get_fundamental_entry, refresh_fundamental_cache
 from market_utils import live_price_from_row, request_kline
 from micro_portfolio import (
     score_snapshot_row,
     select_diversified_micro_candidates,
+)
+from discussion_universe import build_watch_universe, load_discussion_universe
+from recurring_invest import (
+    current_new_york_time,
+    should_execute_weekly_dca,
+    week_marker,
 )
 from screener import fundamental_score, volume_signal, MIN_FUND_SCORE
 from local_broker import LocalBroker
@@ -22,10 +31,13 @@ from strategy_config import (
     ADD_MIN_DAYS,
     ADD_MIN_PROFIT,
     ADD_RSI_MAX,
+    BUCKET_LABEL,
     BUCKETS,
+    BASE_WATCH_UNIVERSE,
     CASH_RESERVE,
     CRASH_RSI_ALERT,
     CRASH_THRESHOLD,
+    DISCUSSION_WATCH_LIMIT,
     DYNAMIC_INTERVAL,
     INITIAL_CASH,
     MICRO_ALLOC,
@@ -42,13 +54,26 @@ from strategy_config import (
     PYRAMID_ADD1_PROFIT,
     PYRAMID_ADD2_DAYS,
     PYRAMID_ADD2_PROFIT,
-    UNIVERSE,
+    REENTRY_COOLDOWN_MINUTES,
+    MICRO_REENTRY_COOLDOWN_MINUTES,
+    SECTOR_MAP,
+    SLOW_FUND_MIN_SCORE,
+    SLOW_FUND_REFRESH_INTERVAL,
+    SLOW_FUND_TIER_FULL,
+    SLOW_FUND_TIER_MID,
+    TRADE_UNIVERSE,
+    WEEKLY_DCA_INTERVAL,
+    WEEKLY_DCA_MIN_HOUR_ET,
+    WEEKLY_DCA_PLAN,
+    WEEKLY_DCA_WEEKDAY_ET,
 )
 from strategy_signals import (
     calc_atr_value,
     calc_rsi,
     detect_entry_signal,
     detect_uptrend,
+    detect_premarket_signal,
+    detect_momentum_surge,
     enrich_indicators,
     indicator_state,
 )
@@ -59,6 +84,7 @@ from strategy_signals import (
 BASE      = os.path.dirname(__file__)
 BROKER_DB = os.path.join(BASE, 'virtual_account.json')
 LOG_FILE  = os.path.join(BASE, 'trade_log.csv')
+HEARTBEAT_INTERVAL = 60
 
 # 动态 watchlist（由 run_dynamic_screener 维护）
 _dynamic_lock  = threading.Lock()
@@ -69,13 +95,31 @@ _dynamic_watch: dict[str, float] = {}   # code → score
 # ══════════════════════════════════════════════════════════
 broker = LocalBroker(BROKER_DB, LOG_FILE, initial_cash=INITIAL_CASH)
 
+
+def runtime_position_snapshot(raw_pos: dict) -> dict:
+    return {
+        'bucket': str(raw_pos.get('bucket', '') or ''),
+        'entry_price': float(raw_pos.get('avg_cost', raw_pos.get('entry_price', 0.0)) or 0.0),
+        'qty': int(raw_pos.get('qty', 0) or 0),
+        'entry_time': str(raw_pos.get('entry_time', '') or ''),
+    }
+
+
+def current_watch_universe() -> list[str]:
+    return build_watch_universe(
+        BASE_WATCH_UNIVERSE,
+        load_discussion_universe(),
+        extra_limit=DISCUSSION_WATCH_LIMIT,
+    )
+
 # 内存持仓缓存（从 broker 初始化）
 _raw = broker.get_state()['positions']
 positions: dict = {
-    code: {'bucket': p['bucket'], 'entry_price': p['avg_cost'], 'qty': p['qty']}
+    code: runtime_position_snapshot(p)
     for code, p in _raw.items()
 }
 positions_lock = threading.Lock()
+BOT_START_TS = time.time()
 
 
 def _restore_runtime_state():
@@ -105,6 +149,10 @@ _trail_lock = threading.Lock()
 _profit_stages: dict[str, set[int]] = {}
 _profit_lock = threading.Lock()
 
+# ── 线程心跳状态（用于证明系统仍在运行）──────────────────────
+_worker_beats: dict[str, dict[str, float | str]] = {}
+_worker_lock = threading.Lock()
+
 # 从 broker 恢复内存状态（重启时执行）
 _restore_runtime_state()
 
@@ -119,15 +167,117 @@ def count_bucket_positions(name: str) -> int:
     with positions_lock:
         return sum(1 for v in positions.values() if v['bucket'] == name)
 
+
+def in_reentry_cooldown(code: str, cooldown_minutes: int) -> bool:
+    return broker.was_sold_recently(code, cooldown_minutes)
+
+
+def mark_worker_beat(name: str, detail: str = ''):
+    with _worker_lock:
+        _worker_beats[name] = {
+            'ts': time.time(),
+            'detail': detail,
+        }
+
+
+def _fmt_age(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s前"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m前"
+    return f"{seconds / 3600:.1f}h前"
+
+
+def _fmt_uptime(seconds: float) -> str:
+    total = int(seconds)
+    h = total // 3600
+    m = (total % 3600) // 60
+    s = total % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _position_bucket_summary() -> str:
+    state = broker.get_state()
+    counts = {name: 0 for name in BUCKETS}
+    counts['dca'] = 0
+    counts['micro'] = 0
+    for pos in state['positions'].values():
+        bucket = str(pos.get('bucket', ''))
+        counts[bucket] = counts.get(bucket, 0) + 1
+    parts = []
+    for key in ['conservative', 'longterm', 'shortterm', 'dca', 'micro']:
+        val = counts.get(key, 0)
+        if val:
+            label = BUCKET_LABEL.get(key, key)
+            parts.append(f"{label}{val}")
+    return " / ".join(parts) if parts else "空仓"
+
+
+def run_bot_heartbeat():
+    print(f"[心跳] 运行监控启动，每 {HEARTBEAT_INTERVAL // 60} 分钟输出一次摘要")
+    while True:
+        state = broker.get_state()
+        with _regime_lock:
+            regime = _regime
+        with _dynamic_lock:
+            watch_count = len(_dynamic_watch)
+        with _worker_lock:
+            beats = dict(_worker_beats)
+
+        worker_parts = []
+        worker_order = ['基本面', '筛选', '底仓', '定投', 'Regime', '预警'] + [cfg['label'] for cfg in BUCKETS.values()]
+        for worker in worker_order:
+            beat = beats.get(worker)
+            if not beat:
+                continue
+            age = _fmt_age(time.time() - float(beat['ts']))
+            detail = str(beat.get('detail', '')).strip()
+            worker_parts.append(f"{worker}:{age}" + (f"({detail})" if detail else ""))
+
+        print(
+            f"[心跳] {datetime.now().strftime('%H:%M:%S')} 运行中"
+            f"  uptime={_fmt_uptime(time.time() - BOT_START_TS)}"
+            f"  regime={regime}"
+            f"  现金=${state['cash']:,.0f}"
+            f"  持仓={len(state['positions'])} ({_position_bucket_summary()})"
+            f"  watch={watch_count}"
+        )
+        if worker_parts:
+            print("[心跳] 线程状态:", " | ".join(worker_parts))
+        time.sleep(HEARTBEAT_INTERVAL)
+
+
+def run_fundamental_refresh():
+    initial_universe = current_watch_universe()
+    print(f"[基本面] 慢速基本面刷新线程启动（日更缓存，观察池 {len(initial_universe)} 只）")
+    mark_worker_beat('基本面', f"启动，观察池{len(initial_universe)}只")
+    while True:
+        try:
+            universe = current_watch_universe()
+            summary = refresh_fundamental_cache(universe)
+            mark_worker_beat(
+                '基本面',
+                f"更新{summary['updated']} 跳过{summary['skipped']} 失败{summary['failed']} 扫描{len(universe)}",
+            )
+            print(
+                f"[基本面] 日更完成：更新 {summary['updated']}，"
+                f"跳过 {summary['skipped']}，失败 {summary['failed']}，"
+                f"扫描 {len(universe)} 只"
+            )
+        except Exception as e:
+            mark_worker_beat('基本面', f"异常:{e}")
+            print(f"[基本面] 刷新异常：{e}")
+        time.sleep(SLOW_FUND_REFRESH_INTERVAL)
+
 # ══════════════════════════════════════════════════════════
 # 动态筛选引擎 — 定期给宇宙全量评分，更新 watchlist
 # ══════════════════════════════════════════════════════════
-def _score_universe(ctx) -> dict[str, float]:
-    """对 UNIVERSE 所有股票评分，返回 code→score 字典。"""
+def _score_universe(ctx, universe: list[str]) -> dict[str, float]:
+    """对当前观察池所有股票评分，返回 code→score 字典。"""
     scores: dict[str, float] = {}
     batch = 40
-    for i in range(0, len(UNIVERSE), batch):
-        chunk = UNIVERSE[i:i+batch]
+    for i in range(0, len(universe), batch):
+        chunk = universe[i:i+batch]
         ret, snap = ctx.get_market_snapshot(chunk)
         if ret != RET_OK:
             continue
@@ -144,10 +294,13 @@ def _score_universe(ctx) -> dict[str, float]:
 def run_dynamic_screener():
     """持续运行的动态筛选线程，每隔 DYNAMIC_INTERVAL 秒更新 _dynamic_watch。"""
     ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
-    print(f"[筛选] 动态筛选引擎启动，宇宙 {len(UNIVERSE)} 只，每 {DYNAMIC_INTERVAL//60} 分钟更新")
+    initial_universe = current_watch_universe()
+    print(f"[筛选] 动态筛选引擎启动，观察池 {len(initial_universe)} 只，每 {DYNAMIC_INTERVAL//60} 分钟更新")
+    mark_worker_beat('筛选', f"启动，周期{DYNAMIC_INTERVAL//60}m")
     try:
         while True:
-            scores = _score_universe(ctx)
+            universe = current_watch_universe()
+            scores = _score_universe(ctx, universe)
             with _dynamic_lock:
                 _dynamic_watch.clear()
                 _dynamic_watch.update(scores)
@@ -155,8 +308,10 @@ def run_dynamic_screener():
             # 打印 top 15
             top = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:15]
             print("[筛选] Top 15:", "  ".join(f"{c.replace('US.','')}({v})" for c, v in top))
+            mark_worker_beat('筛选', f"已更新{len(scores)}只")
             time.sleep(DYNAMIC_INTERVAL)
     except Exception as e:
+        mark_worker_beat('筛选', f"异常:{e}")
         print(f"[筛选] 异常：{e}")
     finally:
         ctx.close()
@@ -178,6 +333,7 @@ def run_micro_builder():
     ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
     print(f"[底仓] 微量建仓线程启动（每只 ${MICRO_ALLOC:.0f}，目标 {MICRO_TARGET_POS} 只，"
           f"上限 {MICRO_MAX_POS} 只，单板块≤{MICRO_SECTOR_CAP}，最低评分 {MICRO_MIN_SCORE}）")
+    mark_worker_beat('底仓', f"启动，目标{MICRO_TARGET_POS}只")
     try:
         # 等待筛选器首次完成
         for _ in range(30):
@@ -211,6 +367,7 @@ def run_micro_builder():
             target_new = max(0, min(MICRO_TARGET_POS, MICRO_MAX_POS) - len(micro_held))
             max_new = max(0, MICRO_MAX_POS - len(micro_held))
             if max_new <= 0:
+                mark_worker_beat('底仓', f"已满{MICRO_MAX_POS}只")
                 print(f"[底仓] 底仓已满（{MICRO_MAX_POS} 只），跳过本轮")
                 time.sleep(DYNAMIC_INTERVAL * 2)
                 continue
@@ -223,7 +380,7 @@ def run_micro_builder():
                 ]
                 for sector, stocks in MICRO_SECTOR_UNIVERSE.items()
             }
-            candidates = select_diversified_micro_candidates(
+            raw_candidates = select_diversified_micro_candidates(
                 scores,
                 selection_universe,
                 held,
@@ -234,9 +391,19 @@ def run_micro_builder():
                 sector_caps=MICRO_SECTOR_CAP_OVERRIDES,
                 required_sectors=MICRO_REQUIRED_SECTORS,
             )
+            candidates = [
+                row for row in raw_candidates
+                if not in_reentry_cooldown(row['code'], MICRO_REENTRY_COOLDOWN_MINUTES)
+            ]
             if target_new <= 0:
+                mark_worker_beat('底仓', f"达标{len(micro_held)}只")
                 print(f"[底仓] 已达到默认目标（{MICRO_TARGET_POS} 只），本轮仅监控止损")
             elif not candidates:
+                cooldown_hits = len(raw_candidates) - len(candidates)
+                detail = f"缺口{target_new}，无候选"
+                if cooldown_hits:
+                    detail += f"，冷静期{cooldown_hits}"
+                mark_worker_beat('底仓', detail)
                 print(f"[底仓] 本轮无新增候选（缺口 {target_new}，评分阈值 {MICRO_MIN_SCORE}）")
 
             bought = 0
@@ -266,20 +433,19 @@ def run_micro_builder():
                     code, 'BUY', qty, price,
                     bucket='micro', reason='micro_position')
                 if ok:
+                    broker_pos = broker.get_state()['positions'].get(code)
                     with positions_lock:
-                        positions[code] = {
-                            'bucket':      'micro',
-                            'entry_price': price,
-                            'qty':         qty,
-                        }
+                        positions[code] = runtime_position_snapshot(broker_pos or {})
                     cash -= cost
                     bought += 1
                     print(f"[底仓] ✅ {code:14s} {qty}股 @ ${price:.2f}"
                           f"  ≈${cost:.0f}  评分{score:.1f}  板块:{sector}  {msg}")
 
             if bought:
+                mark_worker_beat('底仓', f"新建{bought}只，现有{len(state['positions'])}仓")
                 print(f"[底仓] 本轮新建 {bought} 只底仓，剩余现金 ${cash:,.0f}")
             else:
+                mark_worker_beat('底仓', f"候选{len(candidates)}只，无成交")
                 print(f"[底仓] 本轮无新建仓（分散候选：{len(candidates)} 只）")
 
             # 底仓止损：跌超 10% 清出
@@ -302,7 +468,100 @@ def run_micro_builder():
 
             time.sleep(DYNAMIC_INTERVAL * 2)
     except Exception as e:
+        mark_worker_beat('底仓', f"异常:{e}")
         print(f"[底仓] 异常：{e}")
+    finally:
+        ctx.close()
+
+
+def run_weekly_dca():
+    if not WEEKLY_DCA_PLAN:
+        print("[定投] 未配置定投标的，线程退出")
+        return
+
+    ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
+    plan_desc = " / ".join(f"{code.replace('US.', '')}×{qty}" for code, qty in WEEKLY_DCA_PLAN.items())
+    print(
+        f"[定投] 每周定投线程启动（纽约时间每周"
+        f"{['一','二','三','四','五','六','日'][WEEKLY_DCA_WEEKDAY_ET]} "
+        f"{WEEKLY_DCA_MIN_HOUR_ET}:00 后执行：{plan_desc}）"
+    )
+    mark_worker_beat('定投', f"启动，周一 {WEEKLY_DCA_MIN_HOUR_ET}:00 ET")
+    try:
+        while True:
+            now_et = current_new_york_time()
+            marker = week_marker(now_et)
+
+            if not should_execute_weekly_dca(
+                now_et,
+                '',
+                WEEKLY_DCA_WEEKDAY_ET,
+                WEEKLY_DCA_MIN_HOUR_ET,
+            ):
+                mark_worker_beat(
+                    '定投',
+                    f"等待 {now_et.strftime('%Y-%m-%d %H:%M')} ET",
+                )
+                time.sleep(WEEKLY_DCA_INTERVAL)
+                continue
+
+            ret, snap = ctx.get_market_snapshot(list(WEEKLY_DCA_PLAN.keys()))
+            if ret != RET_OK:
+                mark_worker_beat('定投', '快照失败')
+                print("[定投] 快照获取失败，本轮跳过")
+                time.sleep(WEEKLY_DCA_INTERVAL)
+                continue
+
+            snap = cast(pd.DataFrame, snap)
+            price_map = {
+                str(row['code']): live_price_from_row(row)
+                for _, row in snap.iterrows()
+            }
+
+            buys = 0
+            already_done = 0
+            for code, qty in WEEKLY_DCA_PLAN.items():
+                marker_key = f"weekly_dca:{code}"
+                last_marker = broker.get_marker(marker_key, '')
+                if not should_execute_weekly_dca(
+                    now_et,
+                    last_marker,
+                    WEEKLY_DCA_WEEKDAY_ET,
+                    WEEKLY_DCA_MIN_HOUR_ET,
+                ):
+                    already_done += 1
+                    continue
+
+                price = float(price_map.get(code, 0.0))
+                if price <= 0:
+                    print(f"[定投] {code} 实时价缺失，本轮跳过")
+                    continue
+
+                ok, msg = broker.place_order(
+                    code, 'BUY', qty, price,
+                    bucket='dca', reason='weekly_dca')
+                if not ok:
+                    print(f"[定投] {code} 定投失败: {msg}")
+                    continue
+
+                broker.set_marker(marker_key, marker)
+                pos = broker.get_state()['positions'][code]
+                with positions_lock:
+                    positions[code] = runtime_position_snapshot(pos)
+                buys += 1
+                print(f"[定投] ✅ {code:12s} 每周定投 {qty}股 @ ${price:.2f}  {msg}")
+
+            if buys:
+                mark_worker_beat('定投', f"{marker} 已执行{buys}笔")
+            elif already_done == len(WEEKLY_DCA_PLAN):
+                mark_worker_beat('定投', f"{marker} 本周已完成")
+            else:
+                mark_worker_beat('定投', f"{marker} 无成交")
+
+            time.sleep(WEEKLY_DCA_INTERVAL)
+    except Exception as e:
+        mark_worker_beat('定投', f"异常:{e}")
+        print(f"[定投] 异常：{e}")
     finally:
         ctx.close()
 
@@ -320,6 +579,7 @@ def run_regime_monitor():
     global _regime
     ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
     print("[Regime] 市场状态监测启动")
+    mark_worker_beat('Regime', '启动')
     try:
         while True:
             try:
@@ -346,9 +606,11 @@ def run_regime_monitor():
                 if old != new_regime:
                     notify(f"市场状态变化 → {new_regime}",
                            f"SPY={spy_cur:.0f} vs 200MA={spy_200:.0f}  VIX={vix:.1f}")
+                mark_worker_beat('Regime', f"{new_regime} VIX={vix:.1f}")
                 print(f"[Regime] {new_regime}  SPY={spy_cur:.0f}/{spy_200:.0f}"
                       f"  VIX={vix:.1f}")
             except Exception as e:
+                mark_worker_beat('Regime', f"异常:{e}")
                 print(f"[Regime] 检测异常：{e}")
             time.sleep(3600)
     finally:
@@ -364,6 +626,7 @@ def run_crash_monitor():
     alerted    = set()
 
     print(f"[预警] 启动，覆盖 {len(all_stocks)} 只股票")
+    mark_worker_beat('预警', f"启动，覆盖{len(all_stocks)}只")
     try:
         while True:
             ret, snap = ctx.get_market_snapshot(all_stocks)
@@ -403,6 +666,9 @@ def run_crash_monitor():
 
                     elif chg > CRASH_THRESHOLD / 2 and code in alerted:
                         alerted.discard(code)
+                mark_worker_beat('预警', f"扫描{len(all_stocks)}只，告警{len(alerted)}")
+            else:
+                mark_worker_beat('预警', '快照失败')
             time.sleep(300)
     finally:
         ctx.close()
@@ -414,6 +680,7 @@ def run_bucket(name: str, cfg: dict):
     label = cfg['label']
     while True:   # 外层：崩溃后自动重启
         _run_bucket_inner(name, cfg)
+        mark_worker_beat(label, "异常退出，等待重启")
         print(f"[{label}] ⚠️ 线程异常退出，5秒后自动重启...")
         time.sleep(5)
 
@@ -423,6 +690,7 @@ def _run_bucket_inner(name: str, cfg: dict):
     ctx      = OpenQuoteContext(host='127.0.0.1', port=11111)
     label    = cfg['label']
     print(f"[{label}] 启动  {len(cfg['stocks'])}只  最多{cfg['max_pos']}仓×{cfg['alloc']*100:.0f}%")
+    mark_worker_beat(label, f"启动，周期{max(1, cfg['interval']//60)}m")
 
     try:
         while True:
@@ -434,39 +702,42 @@ def _run_bucket_inner(name: str, cfg: dict):
             with positions_lock:
                 for code, p in state['positions'].items():
                     if code not in positions:
-                        positions[code] = {
-                            'bucket':      p['bucket'],
-                            'entry_price': p['avg_cost'],
-                            'qty':         p['qty'],
-                        }
+                        positions[code] = runtime_position_snapshot(p)
                     else:
-                        positions[code]['qty'] = p['qty']
+                        positions[code].update(runtime_position_snapshot(p))
                 for code in list(positions.keys()):
                     if code not in state['positions']:
                         positions.pop(code, None)
 
-            # 动态 watchlist：从 _dynamic_watch 取高分股 + 保底列表
+            # 动态评分只用于排序；真实交易范围限制在本桶名单和当前持仓内。
             with _dynamic_lock:
                 dyn = dict(_dynamic_watch)
-            if dyn:
-                # 从宇宙里取属于本桶股票池（cfg['stocks']保底）的高分股
-                base = set(cfg['stocks'])
-                dyn_top = {c for c, s in dyn.items() if s >= 6.0}
-                stock_list = list(base | (dyn_top & set(UNIVERSE)))
-            else:
-                stock_list = cfg['stocks']
+            bucket_positions = [
+                code for code, pos in state['positions'].items()
+                if pos.get('bucket') == name
+            ]
+            base = list(dict.fromkeys(cfg['stocks'] + bucket_positions))
+            stock_list = sorted(
+                base,
+                key=lambda code: (
+                    0 if code in TRADE_UNIVERSE else 1,
+                    -dyn.get(code, -999.0),
+                    code,
+                ),
+            )
 
             # ── 市场状态过滤 ────────────────────────────────────
             with _regime_lock:
                 regime = _regime
             if regime == 'BEAR' and name != 'conservative':
+                mark_worker_beat(label, "BEAR暂停")
                 print(f"[{label}] BEAR 市场，暂停操作（保守桶仍运行）")
                 time.sleep(cfg['interval'])
                 continue
             # 模拟仓模式：NEUTRAL 不再限制短线桶（仅 BEAR 时才全面收缩）
 
             # ── 批量获取本轮所有股票快照（避免循环内逐个查询触发频率限制）──
-            snap_price_cache: dict[str, float] = {}
+            snap_price_cache: dict = {}   # code→price 及 code+'_row'→Series
             batch_size = 20
             for i in range(0, len(stock_list), batch_size):
                 chunk = stock_list[i:i + batch_size]
@@ -478,6 +749,7 @@ def _run_bucket_inner(name: str, cfg: dict):
                         p = live_price_from_row(r)
                         if p > 0:
                             snap_price_cache[code] = p
+                        snap_price_cache[code + '_row'] = r  # 缓存完整行供盘前异动检测
 
             for stock in stock_list:
                 try:
@@ -487,7 +759,7 @@ def _run_bucket_inner(name: str, cfg: dict):
 
                     df = enrich_indicators(df, cfg)
 
-                    # ATR（用日线计算，shortterm 桶也用日线 ATR 做风控）
+                    # ATR（按当前桶的 K 线周期计算，用于止损与仓位控制）
                     atr_val = calc_atr_value(df)
 
                     latest    = df.iloc[-1]
@@ -531,15 +803,37 @@ def _run_bucket_inner(name: str, cfg: dict):
                         relaxed_buy
                     )
 
+                    # ── 盘前异动 / 动量加速（补充信号）──────────
+                    snap_row_cache = snap_price_cache.get(stock + '_row')
+                    premarket_sig = None
+                    momentum_sig  = None
+                    if snap_row_cache is not None:
+                        premarket_sig = detect_premarket_signal(
+                            snap_row_cache,
+                            min_gap_pct=2.0,
+                            min_pre_vol=50_000,
+                        )
+                    momentum_sig = detect_momentum_surge(
+                        df, fast_now, slow_now,
+                        vol_surge_mult=2.0,
+                        price_accel_pct=0.5,
+                    )
+                    # 优先级：entry_signal > momentum_surge > premarket_gap
+                    if entry_signal is None:
+                        entry_signal = momentum_sig or premarket_sig
+
                     # ── 持仓快照 ────────────────────────────
                     with positions_lock:
                         pos_data = dict(positions[stock]) if stock in positions else None
+                    owns_position = pos_data is not None and pos_data.get('bucket') == name
+                    held_by_other_bucket = pos_data is not None and pos_data.get('bucket') != name
 
                     # ── 持仓中：移动止损 / 分批出场 / 信号卖出 ─
-                    if pos_data is not None:
+                    if owns_position:
                         ep      = pos_data['entry_price']
                         qty     = pos_data['qty']
                         pnl_pct = (price - ep) / ep
+                        held_days = holding_days(pos_data.get('entry_time'))
 
                         # 更新移动高水位（内存 + 持久化）
                         with _trail_lock:
@@ -549,11 +843,23 @@ def _run_bucket_inner(name: str, cfg: dict):
                                 broker.update_trail_high(stock, new_high)
                             trail_high = _trailing_highs[stock]
 
-                        trail_stop = trail_high - atr_val * 1.5
+                        trail_state = evaluate_trailing_stop(
+                            ep,
+                            price,
+                            trail_high,
+                            atr_val,
+                            activate_profit=float(cfg.get('trail_activate_profit', 0.03)),
+                            break_even_profit=float(cfg.get('break_even_profit', 0.05)),
+                            break_even_buffer=float(cfg.get('break_even_buffer', 0.001)),
+                            atr_mult=float(cfg.get('trail_atr_mult', 1.5)),
+                        )
+                        trail_stop = trail_state['effective_stop']
 
                         print(f"[{label}] {stock:12s} {price:>9.2f}"
                               f"  {ind_str}  盈亏:{pnl_pct*100:+.1f}%"
-                              f"  trail_stop:${trail_stop:.2f}")
+                              f"  持仓:{held_days}天"
+                              f"  trail:{'on' if trail_state['trail_active'] else 'off'}"
+                              f"  stop:${trail_stop:.2f}")
 
                         # ── 分批止盈（3 阶段）──────────────────────────
                         with _profit_lock:
@@ -601,8 +907,15 @@ def _run_bucket_inner(name: str, cfg: dict):
                         sell_reason = None
                         if pnl_pct <= -cfg['stop_loss']:
                             sell_reason = 'stop_loss'
-                        elif price < trail_stop and pnl_pct > 0.03:
+                        elif trail_state['triggered']:
                             sell_reason = 'trailing_stop'
+                        elif should_time_stop(
+                            pos_data.get('entry_time'),
+                            pnl_pct,
+                            max_days=int(cfg.get('time_stop_days', 0)),
+                            min_return=float(cfg.get('time_stop_min_return', 0.0)),
+                        ):
+                            sell_reason = 'time_stop'
                         elif ma_death and (name != 'longterm' or extra_sell):
                             sell_reason = 'death_cross'
                         elif extra_sell and name == 'conservative':
@@ -615,6 +928,7 @@ def _run_bucket_inner(name: str, cfg: dict):
                             if ok:
                                 tag = {'stop_loss':'🛑 止损',
                                        'trailing_stop':'📉 移动止损',
+                                       'time_stop':'⏳ 时间止损',
                                        'death_cross':'🔴 死叉',
                                        'rsi_overbought':'🟡 RSI超买'}.get(sell_reason,'卖出')
                                 print(f"[{label}] {tag} {stock}  {msg}")
@@ -664,17 +978,15 @@ def _run_bucket_inner(name: str, cfg: dict):
                                                   f" +{add_qty}股 @ ${price:.2f}"
                                                   f"  事件:{ENTRY_REASON_LABEL.get(signal_reason, signal_reason)}"
                                                   f" | {signal_note}  {msg2}")
-                                            new_avg = broker.get_state()['positions'][stock]['avg_cost']
+                                            broker_pos = broker.get_state()['positions'][stock]
                                             with positions_lock:
-                                                positions[stock]['qty'] += add_qty
-                                                positions[stock]['entry_price'] = new_avg
+                                                positions[stock] = runtime_position_snapshot(broker_pos)
                                             cash = broker.get_cash()
                                             continue
 
                                 # ── 分批建仓（Pyramid）：最多加仓两次 ──────
                                 _entry = _bp.get('entry_time', '')
-                                _days  = (datetime.now() - datetime.strptime(
-                                    _entry, '%Y-%m-%d %H:%M:%S')).days if _entry else 0
+                                _days  = holding_days(_entry)
                                 _rsi_ok = (rsi_now < cfg.get('add_rsi_max', ADD_RSI_MAX)
                                            if name == 'conservative' else True)
                                 _trend  = fast_now > slow_now
@@ -701,10 +1013,9 @@ def _run_bucket_inner(name: str, cfg: dict):
                                             print(f"[{label}] ➕ 金字塔② {stock}"
                                                   f" +{_add_qty}股 @ ${price:.2f}"
                                                   f"（盈{pnl_pct*100:.1f}%，持{_days}天）  {msg2}")
-                                            new_avg = broker.get_state()['positions'][stock]['avg_cost']
+                                            broker_pos = broker.get_state()['positions'][stock]
                                             with positions_lock:
-                                                positions[stock]['qty']        += _add_qty
-                                                positions[stock]['entry_price'] = new_avg
+                                                positions[stock] = runtime_position_snapshot(broker_pos)
                                             cash = broker.get_cash()
 
                                 # 第三批：盈利 ≥ +12%，持仓 ≥ 14 天
@@ -729,55 +1040,92 @@ def _run_bucket_inner(name: str, cfg: dict):
                                             print(f"[{label}] ➕ 金字塔③ {stock}"
                                                   f" +{_add_qty}股 @ ${price:.2f}"
                                                   f"（盈{pnl_pct*100:.1f}%，持{_days}天）  {msg2}")
-                                            new_avg = broker.get_state()['positions'][stock]['avg_cost']
+                                            broker_pos = broker.get_state()['positions'][stock]
                                             with positions_lock:
-                                                positions[stock]['qty']        += _add_qty
-                                                positions[stock]['entry_price'] = new_avg
+                                                positions[stock] = runtime_position_snapshot(broker_pos)
                                             cash = broker.get_cash()
 
                     # ── 空仓：三层分级买入逻辑 ────────────────────────
                     else:
+                        if held_by_other_bucket:
+                            continue
+
                         # 实时价获取失败时禁止开新仓，避免用历史K线价买入
                         if _no_new_entry:
                             continue
 
-                        # 1. 基本面评分（快照）
+                        if in_reentry_cooldown(stock, REENTRY_COOLDOWN_MINUTES):
+                            reason = broker.last_sell_reason(stock)
+                            reason_note = f" 上次卖出:{reason}" if reason else ''
+                            print(f"[{label}] {stock} 卖出后冷静期内，跳过{reason_note}")
+                            continue
+
+                        sector = SECTOR_MAP.get(stock, '')
                         ret_snap, snap_df = ctx.get_market_snapshot([stock])
                         snap_df = cast(pd.DataFrame, snap_df)
+                        snap_row = snap_df.iloc[0] if ret_snap == RET_OK and len(snap_df) else None
+
+                        # 1. 快速快照评分 + 量价过滤
                         if ret_snap == RET_OK:
-                            fund_sc, fund_notes = fundamental_score(snap_df.iloc[0])
+                            fund_sc, fund_notes = fundamental_score(snap_row)
                             vol_sig, vol_note   = volume_signal(df)
                         else:
                             fund_sc, fund_notes = 5.0, ['快照缺失']
                             vol_sig, vol_note   = 'neutral', ''
 
-                        if fund_sc < MIN_FUND_SCORE[name]:
-                            print(f"[{label}] {stock} 基本面不达标"
-                                  f"({fund_sc:.0f}/10)，跳过")
-                            continue
                         if vol_sig == 'negative':
                             print(f"[{label}] {stock} 量价信号负面({vol_note})，观望")
                             continue
 
-                        # 2. 三层分级：评分决定入场条件和仓位倍率
-                        if fund_sc >= 7.0:
+                        # 2. 日更慢速基本面优先；缺失时退回快照评分
+                        slow_entry = get_fundamental_entry(stock, refresh_if_stale=False)
+                        slow_eval = score_slow_fundamentals(
+                            stock,
+                            sector,
+                            slow_entry,
+                            snapshot=snap_row,
+                        )
+                        slow_sc = slow_eval['score']
+                        slow_notes = slow_eval['notes']
+
+                        if slow_eval['available']:
+                            if slow_sc < SLOW_FUND_MIN_SCORE[name]:
+                                print(f"[{label}] {stock} 慢基本面不达标"
+                                      f"({slow_sc:.0f}/100)，跳过")
+                                continue
+                            fund_gate_value = slow_sc
+                            fund_gate_label = f"慢分{slow_sc:.0f}/100"
+                            fund_note = slow_notes[0] if slow_notes else '慢分通过'
+                        else:
+                            if fund_sc < MIN_FUND_SCORE[name]:
+                                print(f"[{label}] {stock} 快照基本面不达标"
+                                      f"({fund_sc:.0f}/10)，跳过")
+                                continue
+                            fund_gate_value = fund_sc * 10
+                            fund_gate_label = f"快分{fund_sc:.0f}/10"
+                            fund_note = fund_notes[0] if fund_notes else '快分通过'
+
+                        # 3. 三层分级：慢分决定质量层，快分只做兜底
+                        if fund_gate_value >= SLOW_FUND_TIER_FULL:
                             # 一层：蓝筹底仓 ── 趋势确认即建仓，满仓
                             chosen_signal = (
                                 detect_uptrend(df, fast_now, slow_now)
                                 or entry_signal
                             )
                             alloc_mult = 1.0
-                            tier_label = f"蓝筹底仓(评分{fund_sc:.0f})"
-                        elif fund_sc >= 5.0:
+                            tier_label = f"高质量({fund_gate_label})"
+                        elif fund_gate_value >= SLOW_FUND_TIER_MID:
                             # 二层：成长趋势 ── 普通信号，七成仓
                             chosen_signal = entry_signal
+                            if cfg.get('prefer_uptrend_entry'):
+                                chosen_signal = detect_uptrend(df, fast_now, slow_now) or chosen_signal
                             alloc_mult = 0.7
-                            tier_label = f"成长趋势(评分{fund_sc:.0f})"
+                            tier_label = f"均衡质量({fund_gate_label})"
                         else:
                             # 三层：热门赛道 ── 普通信号，四成小仓
                             chosen_signal = entry_signal
                             alloc_mult = 0.4
-                            tier_label = f"热门赛道(评分{fund_sc:.0f})"
+                            tier_label = f"试探仓({fund_gate_label})"
 
                         if chosen_signal is None:
                             continue
@@ -808,16 +1156,13 @@ def _run_bucket_inner(name: str, cfg: dict):
                                 screen = (f"{tier_label}"
                                           f" | {ENTRY_REASON_LABEL.get(signal_reason, signal_reason)}"
                                           f"({signal_note})"
-                                          f" | 基本面{fund_sc:.0f}/10({fund_notes[0]})"
+                                          f" | {fund_gate_label}({fund_note})"
                                           f" | ATR={atr_val:.2f}")
                                 print(f"[{label}] ✅ {stock} {msg}"
                                       f"  {ind_str} | {screen}")
+                                broker_pos = broker.get_state()['positions'].get(stock)
                                 with positions_lock:
-                                    positions[stock] = {
-                                        'bucket':      name,
-                                        'entry_price': price,
-                                        'qty':         qty,
-                                    }
+                                    positions[stock] = runtime_position_snapshot(broker_pos or {})
                                 with _trail_lock:
                                     _trailing_highs[stock] = price
                                 with _profit_lock:
@@ -829,9 +1174,11 @@ def _run_bucket_inner(name: str, cfg: dict):
                 except Exception as e:
                     print(f"[{label}] {stock} 异常：{e}")
 
+            mark_worker_beat(label, f"完成{len(stock_list)}只扫描")
             time.sleep(cfg['interval'])
 
     except Exception as e:
+        mark_worker_beat(label, f"崩溃:{e}")
         print(f"[{label}] 崩溃：{e}")
     finally:
         ctx.close()
@@ -840,9 +1187,12 @@ def _run_bucket_inner(name: str, cfg: dict):
 # 主入口
 # ══════════════════════════════════════════════════════════
 threads = [
+    threading.Thread(target=run_bot_heartbeat, daemon=True, name='heartbeat'),
+    threading.Thread(target=run_fundamental_refresh, daemon=True, name='fundamental_refresh'),
     threading.Thread(target=run_regime_monitor,  daemon=True, name='regime'),
     threading.Thread(target=run_dynamic_screener, daemon=True, name='screener'),
     threading.Thread(target=run_micro_builder,    daemon=True, name='micro'),
+    threading.Thread(target=run_weekly_dca,      daemon=True, name='weekly_dca'),
 ] + [
     threading.Thread(target=run_bucket, args=(name, cfg), daemon=True, name=f'bucket_{name}')
     for name, cfg in BUCKETS.items()
