@@ -9,6 +9,8 @@ entry_engine.py — 入场信号级联与分层买入
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pandas as pd
 
 import time as _time
@@ -23,7 +25,19 @@ from shared_state import (
     broker, count_bucket_positions, get_regime, has_open_order,
     is_circuit_breaker_active, get_circuit_breaker_status,
 )
-from strategy_config import CASH_RESERVE, SECTOR_MAP
+from strategy_config import (
+    CASH_RESERVE,
+    ENTRY_HARD_REJECT_FUND_FLOOR_RATIO,
+    ENTRY_PROBE_ALLOC_MULT,
+    ENTRY_SCORE_FULL,
+    ENTRY_SCORE_PROBE,
+    ENTRY_SCORE_SCALE,
+    ENTRY_SIGNAL_THRESHOLD,
+    ENTRY_SIGNAL_THRESHOLD_HIGH_QUALITY,
+    ENTRY_SIGNAL_THRESHOLD_MID_QUALITY,
+    SECTOR_MAP,
+)
+from market_regime import score_signal, EmotionPhase, emotion_phase
 from strategy_signals import (
     detect_entry_signal,
     detect_uptrend,
@@ -50,6 +64,107 @@ _CORR_PENALTY_MAX = 0.70   # 3只及以上同板块持仓时的下限
 _discussion_feed_cache: dict = {}
 _discussion_feed_ts: float   = 0.0
 _DISCUSSION_CACHE_TTL        = 3600.0   # 1小时
+
+
+@dataclass
+class EntryAdmission:
+    total: float
+    action: str
+    alloc_mult: float
+    notes: list[str]
+
+
+def signal_threshold_for_quality(
+    base_threshold: float,
+    quality_score: float | None,
+) -> float:
+    """高质量股票放宽最低信号分，允许更自然的趋势建仓。"""
+    if quality_score is None:
+        return base_threshold
+    if quality_score >= 7.5:
+        return min(base_threshold, ENTRY_SIGNAL_THRESHOLD_HIGH_QUALITY)
+    if quality_score >= 6.0:
+        return min(base_threshold, ENTRY_SIGNAL_THRESHOLD_MID_QUALITY)
+    return base_threshold
+
+
+def score_entry_candidate(
+    *,
+    bucket_name: str,
+    signal_score: float,
+    quality_score: float,
+    fund_sc: float,
+    skip_fast_fund_gate: bool,
+    vol_sig: str = 'neutral',
+    emotion_top: bool = False,
+) -> EntryAdmission:
+    """
+    用综合评分替代串行一票否决。
+
+    只把真正危险的情况留给硬风控；其余因素转为加减分，允许小仓试探。
+    """
+    notes: list[str] = []
+    total = 0.0
+
+    signal_component = max(0.0, min(45.0, signal_score * 3.2))
+    total += signal_component
+    notes.append(f"信号{signal_score:.1f}")
+
+    quality_component = max(0.0, min(35.0, quality_score * 3.0))
+    total += quality_component
+    notes.append(f"质量{quality_score:.1f}")
+
+    if skip_fast_fund_gate:
+        total += min(6.0, max(0.0, fund_sc) * 0.6)
+    else:
+        fund_floor = float(MIN_FUND_SCORE.get(bucket_name, 3.0))
+        if fund_sc < fund_floor * ENTRY_HARD_REJECT_FUND_FLOOR_RATIO:
+            return EntryAdmission(
+                total=0.0,
+                action='reject',
+                alloc_mult=0.0,
+                notes=[f"快基本面过弱({fund_sc:.1f}/{fund_floor:.1f})"],
+            )
+        if fund_sc < fund_floor:
+            total -= 12.0
+            notes.append(f"快基本面低于门槛({fund_sc:.1f})")
+        else:
+            total += min(10.0, fund_sc * 1.2)
+
+    if vol_sig == 'positive':
+        total += 5.0
+        notes.append("量价正面")
+    elif vol_sig == 'negative':
+        penalty = 12.0 if bucket_name == 'shortterm' else 9.0
+        total -= penalty
+        notes.append(f"量价负面(-{penalty:.0f})")
+
+    if emotion_top:
+        total -= 12.0
+        notes.append("情绪顶部")
+
+    regime = get_regime()
+    regime_adj = {'BULL': 4.0, 'NEUTRAL': 0.0, 'BEAR': -10.0}.get(regime, 0.0)
+    total += regime_adj
+    if regime_adj > 0:
+        notes.append(f"市场{regime}(+{regime_adj:.0f})")
+    elif regime_adj < 0:
+        notes.append(f"市场{regime}({regime_adj:.0f})")
+
+    total = max(0.0, min(100.0, total))
+    if total >= ENTRY_SCORE_FULL:
+        return EntryAdmission(total=total, action='full', alloc_mult=1.0, notes=notes)
+    if total >= ENTRY_SCORE_SCALE:
+        return EntryAdmission(total=total, action='scaled', alloc_mult=0.75, notes=notes)
+    if total >= ENTRY_SCORE_PROBE:
+        notes.append("试探仓")
+        return EntryAdmission(
+            total=total,
+            action='probe',
+            alloc_mult=ENTRY_PROBE_ALLOC_MULT,
+            notes=notes,
+        )
+    return EntryAdmission(total=total, action='reject', alloc_mult=0.0, notes=notes)
 
 
 def _get_discussion_feed() -> dict:
@@ -176,80 +291,110 @@ def build_signal_cascade(
     snap_row: pd.Series | None,
     price: float,
     allow_uptrend: bool = False,
-) -> tuple[str, str] | None:
+    bucket_name: str = 'default',
+    score_threshold: float = ENTRY_SIGNAL_THRESHOLD,
+    quality_score: float | None = None,
+) -> tuple[str, str, float] | None:
     """
-    按优先级聚合全部入场信号，返回最优信号或 None。
+    收集全部候选信号，用 score_signal() 评分后返回得分最高者。
 
-    优先级（高→低）：
-      原始信号（金叉/回踩/突破）
-      > MACD零轴上穿
-      > 52周新高
-      > BB收窄突破
-      > 动量加速
-      > RSI超卖反弹
-      > 盘前异动
+    修复原版问题：原版把 golden_cross 排在第一位，遇到金叉就直接返回，
+    导致更强的 52w_high / bb_breakout / momentum_surge 永远被截断。
+    现改为「先收集所有触发的信号 → 逐一评分 → 取最高分」策略。
+    低于 score_threshold 分的信号一律丢弃，避免弱信号入场。
+
+    信号强度参考（DSA 策略思想，适配美股）：
+      强：52w_high(13) / bb_breakout(11) / macd_zero_cross(12) / breakout(14)
+      中：trend_pullback(12) / momentum_surge(10) / golden_cross(10)
+      弱：rsi_bounce(9) / uptrend(8) / premarket_gap(7)
     """
-    # 原始技术信号（金叉 / 回踩 / 突破）
+    candidates: list[tuple[str, str]] = []
+
+    # ── 收集所有触发的信号 ─────────────────────────────────────────
+
+    # 基础技术信号：金叉 / 回踩 / 突破（来自桶配置的 entry_modes）
     base_sig = detect_entry_signal(
         cfg, df, latest, prev_row,
         fast_now, slow_now, fast_prev, slow_prev,
         extra_buy,
     )
     if base_sig:
-        return base_sig
+        candidates.append(base_sig)
 
     if allow_uptrend:
         uptrend_sig = detect_uptrend(df, fast_now, slow_now)
         if uptrend_sig:
-            return uptrend_sig
+            candidates.append(uptrend_sig)
 
-    # MACD 零轴上穿
+    # MACD 零轴上穿（趋势由负转正，强度高于普通金叉）
     macd_sig = detect_macd_zero_cross(df)
     if macd_sig:
-        return macd_sig
+        candidates.append(macd_sig)
 
-    # 52 周新高
+    # 52 周新高（机构行为确认，美股最可靠的强势信号之一）
     if snap_row is not None:
         h52_sig = detect_52w_high_breakout(snap_row, price, within_pct=0.03)
         if h52_sig:
-            return h52_sig
+            candidates.append(h52_sig)
 
-    # 布林带收窄突破
+    # 布林带收窄突破（蓄势爆发，适合 shortterm / longterm）
     bb_sig = detect_bollinger_breakout(df, squeeze_threshold=0.04)
     if bb_sig:
-        return bb_sig
+        candidates.append(bb_sig)
 
-    # 动量加速
+    # 动量加速（量价齐升，不等回踩直接追）
     mom_sig = detect_momentum_surge(df, fast_now, slow_now,
                                     vol_surge_mult=2.0, price_accel_pct=0.5)
     if mom_sig:
-        return mom_sig
+        candidates.append(mom_sig)
 
-    # RSI 超卖反弹
+    # RSI 超卖反弹（逆向低吸，适合 conservative）
     rsi_sig = detect_rsi_bounce(df, oversold=32.0, recover=38.0)
     if rsi_sig:
-        return rsi_sig
+        candidates.append(rsi_sig)
 
-    # 盘前异动
+    # 盘前异动（风险高，最低优先级）
     if snap_row is not None:
         pre_sig = detect_premarket_signal(snap_row, min_gap_pct=2.0, min_pre_vol=50_000)
         if pre_sig:
-            return pre_sig
+            candidates.append(pre_sig)
 
-    return None
+    if not candidates:
+        return None
+
+    # ── 评分排序，取最高分 ─────────────────────────────────────────
+    best_sig: tuple[str, str] | None = None
+    best_score = -999.0
+
+    for sig in candidates:
+        event_type, reason = sig
+        ss = score_signal(df, event_type, bucket=bucket_name)
+        if ss.total > best_score:
+            best_score = ss.total
+            best_sig = sig
+
+    min_signal_score = signal_threshold_for_quality(score_threshold, quality_score)
+    if best_score < min_signal_score:
+        print(f"[信号过滤] 最优信号评分{best_score:.0f}<{min_signal_score:.0f}，放弃入场")
+        return None
+
+    assert best_sig is not None
+    return best_sig[0], best_sig[1], best_score
 
 
 def tiered_entry(
     ctx,
     stock: str,
-    signal: tuple[str, str],
+    signal: tuple[str, str, float],
     fund_sc: float,
     fund_notes: list,
+    vol_sig: str,
     vol_note: str,
     cfg: dict,
     bucket_name: str,
     label: str,
     ind_str: str,
+    df: pd.DataFrame,
     price: float,
     atr_val: float,
     cash: float,
@@ -277,10 +422,6 @@ def tiered_entry(
         print(f"[{label}] {stock} {cb_status}，跳过入场")
         return False, cash
 
-    if (not skip_fast_fund_gate) and fund_sc < MIN_FUND_SCORE.get(bucket_name, 3.0):
-        print(f"[{label}] {stock} 基本面不达标({fund_sc:.0f}/10)，跳过")
-        return False, cash
-
     if has_open_order(stock):
         print(f"[{label}] {stock} 已有未完成订单，跳过")
         return False, cash
@@ -298,21 +439,50 @@ def tiered_entry(
         print(f"[{label}] {stock} 现金储备不足，跳过")
         return False, cash
 
+    signal_reason, signal_note, signal_score = signal
     tier_score = float(quality_score if quality_score is not None else fund_sc)
+    emotion_top = False
+    emotion_reason = ''
+    if bucket_name in ('shortterm', 'longterm'):
+        em = emotion_phase(df)
+        emotion_top = em.phase == EmotionPhase.TOP
+        if emotion_top:
+            emotion_reason = em.reason
+
+    admission = score_entry_candidate(
+        bucket_name=bucket_name,
+        signal_score=signal_score,
+        quality_score=tier_score,
+        fund_sc=fund_sc,
+        skip_fast_fund_gate=skip_fast_fund_gate,
+        vol_sig=vol_sig,
+        emotion_top=emotion_top,
+    )
+    if admission.action == 'reject':
+        extra = f" | 情绪:{emotion_reason}" if emotion_reason else ''
+        print(
+            f"[{label}] {stock} 综合评分{admission.total:.0f}不足，跳过"
+            f" ({'; '.join(admission.notes)}){extra}"
+        )
+        return False, cash
 
     # 确定分层
     if tier_score >= 7.0:
-        alloc_mult  = 1.0
+        quality_alloc_mult = 1.0
         tier_label  = f"蓝筹底仓(质量{tier_score:.1f})"
-        signal_reason, signal_note = signal
     elif tier_score >= 5.0:
-        alloc_mult  = 0.7
+        quality_alloc_mult = 0.7
         tier_label  = f"成长趋势(质量{tier_score:.1f})"
-        signal_reason, signal_note = signal
     else:
-        alloc_mult  = 0.4
+        quality_alloc_mult = 0.4
         tier_label  = f"热门赛道(质量{tier_score:.1f})"
-        signal_reason, signal_note = signal
+
+    decision_label = {
+        'full': '标准仓',
+        'scaled': '轻仓',
+        'probe': '试探仓',
+    }.get(admission.action, admission.action)
+    alloc_mult = quality_alloc_mult * admission.alloc_mult
 
     # 综合入场缩放：讨论热度 × 市场状态 × 板块相关性
     entry_scale, scale_note = compute_entry_scale(stock)
@@ -328,11 +498,13 @@ def tiered_entry(
         return False, cash
 
     extra_note = (
-        f"{tier_label}"
+        f"{tier_label} | {decision_label} | 综合分{admission.total:.0f}"
         f" | {ENTRY_REASON_LABEL.get(signal_reason, signal_reason)}({signal_note})"
         f" | 基本面{fund_sc:.0f}/10({fund_notes[0] if fund_notes else ''})"
         f"{f' | {quality_note}' if quality_note else ''}"
+        f"{f' | 情绪顶部({emotion_reason})' if emotion_reason else ''}"
         f"{f' | 缩放×{entry_scale:.2f}({scale_note})' if scale_note else ''}"
+        f" | 决策:{'; '.join(admission.notes)}"
         f" | {vol_note} | ATR={atr_val:.2f}"
     )
 

@@ -17,8 +17,10 @@ from market_utils import (
     current_session, next_session_info, fmt_countdown,
     SESSION_LABEL, SESSION_COLOR, now_et,
 )
+from market_regime import emotion_phase, EmotionPhase
 from performance import calc_pnl_metrics
 from recurring_invest import current_new_york_time, week_marker
+from runtime_state import load_runtime_state
 from screener import fundamental_score, volume_signal
 from strategy_config import (
     BASE_WATCH_UNIVERSE,
@@ -34,11 +36,12 @@ from strategy_config import (
 )
 
 BASE           = os.path.dirname(__file__)
-BROKER_DB      = os.path.join(BASE, 'virtual_account.json')
+BROKER_SNAPSHOT = os.path.join(BASE, 'virtual_account.json')
 BROKER_SQLITE  = os.path.join(BASE, 'virtual_account.sqlite3')
 LOG_FILE       = os.path.join(BASE, 'trade_log.csv')
 CUSTOM_WL_FILE = os.path.join(BASE, 'custom_watchlist.json')
 REFRESH        = 15
+RUNTIME_STALE_SECONDS = 180
 
 def _load_custom_wl() -> list[str]:
     try:
@@ -149,6 +152,38 @@ with st.sidebar:
             st.session_state.custom_wl = []
             _save_custom_wl([])
             st.rerun()
+
+    st.divider()
+
+    # ── Worker 线程心跳 ───────────────────────────────────────
+    st.markdown("#### 🤖 策略线程")
+    _now_ts = time.time()
+    runtime = load_runtime_state()
+    beats = runtime.get('worker_beats', {})
+    runtime_age = _now_ts - float(runtime.get('updated_ts', 0.0) or 0.0)
+    if not beats:
+        st.caption("主交易进程未运行")
+    else:
+        if runtime_age > RUNTIME_STALE_SECONDS:
+            st.caption(f"主交易进程状态过期，最后更新 {int(runtime_age)}s 前")
+        for wname, winfo in sorted(beats.items()):
+            age   = _now_ts - float(winfo.get('ts', _now_ts))
+            detail = str(winfo.get('detail', ''))
+            if age < 90:
+                dot, color = '🟢', '#22c55e'
+            elif age < 300:
+                dot, color = '🟡', '#f59e0b'
+            else:
+                dot, color = '🔴', '#ef4444'
+            age_str = f'{int(age)}s 前' if age < 3600 else f'{int(age/3600)}h 前'
+            st.markdown(
+                f'<div style="margin:3px 0;font-size:.75rem;">'
+                f'{dot} <b style="color:{color}">{wname}</b>'
+                f'<span style="color:#64748b;margin-left:6px">{age_str}</span>'
+                f'<br><span style="color:#94a3b8;font-size:.68rem;padding-left:14px">{detail[:40]}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
 
     st.divider()
     st.caption(f"行情来源：Moomoo OpenD\n交易：本地虚拟撮合")
@@ -411,11 +446,12 @@ def load_klines(stocks: tuple) -> dict:
     return result
 
 def load_account() -> dict:
-    if not os.path.exists(BROKER_DB) and not os.path.exists(BROKER_SQLITE):
+    if not os.path.exists(BROKER_SNAPSHOT) and not os.path.exists(BROKER_SQLITE):
         return {'initial_cash':1_000_000,'cash':1_000_000,
                 'reserved_cash':0,'realized_pnl':0,'total_commission':0,
                 'positions':{},'orders':[],'fills':[],'meta':{'markers':{}}}
-    broker = LocalBroker(BROKER_DB, LOG_FILE, initial_cash=1_000_000.0)
+    broker_path = BROKER_SQLITE if os.path.exists(BROKER_SQLITE) else BROKER_SNAPSHOT
+    broker = LocalBroker(broker_path, LOG_FILE, initial_cash=1_000_000.0)
     return broker.get_state()
 
 def load_trades() -> pd.DataFrame:
@@ -739,6 +775,48 @@ trades    = load_trades()
 prices    = load_prices(tuple(ALL_STOCKS))
 klines    = load_klines(tuple(ALL_STOCKS))
 slow_fund_cache = load_slow_fundamentals()
+runtime_state = load_runtime_state()
+runtime_state_age = time.time() - float(runtime_state.get('updated_ts', 0.0) or 0.0)
+
+# ── 市场状态 & 情绪阶段（用 SPY 日线计算）───────────────────
+_regime_now = str(runtime_state.get('regime', 'UNKNOWN') or 'UNKNOWN')
+_cb_runtime = runtime_state.get('circuit_breaker', {}) if isinstance(runtime_state, dict) else {}
+
+_REGIME_LABEL = {
+    'BULL':    ('📈 多头', '#22c55e'),
+    'NEUTRAL': ('⚖️ 中性', '#f59e0b'),
+    'BEAR':    ('📉 空头', '#ef4444'),
+}
+_regime_lbl, _regime_clr = _REGIME_LABEL.get(_regime_now, ('—', '#6b7280'))
+
+_REGIME_DESC = {
+    'BULL':    '全桶正常运行',
+    'NEUTRAL': 'shortterm 降频，保守观望',
+    'BEAR':    '仅 conservative 桶运行',
+}
+_regime_desc = _REGIME_DESC.get(_regime_now, '')
+_cb_active = bool(_cb_runtime.get('active'))
+_cb_status = str(_cb_runtime.get('status', '') or '')
+
+# 情绪阶段：优先用 SPY 日线，fallback 到 QQQ
+_EM_LABEL = {
+    EmotionPhase.BOTTOM:  ('🟢 极度恐慌', '#22c55e', '逆向布局区'),
+    EmotionPhase.WARMING: ('🟡 情绪启动', '#fbbf24', '正常建仓'),
+    EmotionPhase.NORMAL:  ('⚪ 正常区间', '#94a3b8', '维持仓位'),
+    EmotionPhase.HEATING: ('🟠 情绪过热', '#f97316', '减少新开仓'),
+    EmotionPhase.TOP:     ('🔴 狂热顶部', '#ef4444', '止盈减仓'),
+}
+_spy_df   = klines.get('US.SPY') or klines.get('US.QQQ')
+_em_phase = None
+_em_lbl, _em_clr, _em_hint, _em_reason = '—', '#6b7280', '—', ''
+if _spy_df is not None and len(_spy_df) >= 20:
+    try:
+        _em = emotion_phase(_spy_df)
+        _em_phase = _em.phase
+        _em_lbl, _em_clr, _em_hint = _EM_LABEL.get(_em.phase, ('—', '#6b7280', '—'))
+        _em_reason = _em.reason
+    except Exception:
+        pass
 positions = account.get('positions', {})
 orders = list(account.get('orders', []))
 fills = list(account.get('fills', []))
@@ -945,8 +1023,24 @@ st.markdown(f"""
     <div class="kpi-value">{trade_count}</div>
     <div class="kpi-sub">买入 {buy_count} · 卖出 {sell_count}</div>
   </div>
+  <div class="kpi" style="border-color:{_regime_clr}55">
+    <div class="kpi-label">市场状态（Regime）</div>
+    <div class="kpi-value" style="color:{_regime_clr}">{_regime_lbl}</div>
+    <div class="kpi-sub">{_regime_desc}</div>
+  </div>
+  <div class="kpi" style="border-color:{_em_clr}55">
+    <div class="kpi-label">市场情绪（SPY）</div>
+    <div class="kpi-value" style="color:{_em_clr}">{_em_lbl}</div>
+    <div class="kpi-sub">{_em_hint}</div>
+    <div class="kpi-subline">{_em_reason[:60] if _em_reason else '—'}</div>
+  </div>
 </div>
 """, unsafe_allow_html=True)
+
+if runtime_state_age > RUNTIME_STALE_SECONDS:
+    st.warning(f"策略运行状态已过期，最后一次后端心跳约 {int(runtime_state_age)} 秒前。")
+elif _cb_active and _cb_status:
+    st.error(f"组合熔断生效中：{_cb_status}")
 
 # ══════════════════════════════════════════════════════════
 # Tabs

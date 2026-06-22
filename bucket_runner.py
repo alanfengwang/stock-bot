@@ -35,6 +35,7 @@ from strategy_config import (
     REENTRY_COOLDOWN_MINUTES,
     SECTOR_MAP,
     SLOW_FUND_MIN_SCORE,
+    SLOW_FUND_SOFT_MARGIN,
     SLOW_FUND_TIER_FULL,
     SLOW_FUND_TIER_MID,
     TRADE_UNIVERSE,
@@ -50,7 +51,7 @@ def _quality_context(
 ) -> dict:
     sector = SECTOR_MAP.get(stock, '')
     if snap_row is not None:
-        fund_sc, fund_notes = fundamental_score(snap_row)
+        fund_sc, fund_notes = fundamental_score(snap_row, bucket=bucket_name)
     else:
         fund_sc, fund_notes = 5.0, ['快照缺失']
 
@@ -64,18 +65,25 @@ def _quality_context(
 
     if slow_eval['available']:
         slow_sc = float(slow_eval['score'] or 0.0)
-        if slow_sc < SLOW_FUND_MIN_SCORE[bucket_name]:
+        min_slow_score = float(SLOW_FUND_MIN_SCORE[bucket_name])
+        hard_floor = max(0.0, min_slow_score - SLOW_FUND_SOFT_MARGIN)
+        if slow_sc < hard_floor:
             return {
                 'allowed': False,
-                'reason': f"慢基本面不达标({slow_sc:.0f}/100)",
+                'reason': f"慢基本面过弱({slow_sc:.0f}/100)",
             }
         slow_notes = slow_eval.get('notes', [])
+        below_min = slow_sc < min_slow_score
+        slow_suffix = "，低于门槛仅小仓试探" if below_min else ""
         return {
             'allowed': True,
             'fund_sc': fund_sc,
             'fund_notes': fund_notes,
             'quality_score': slow_sc / 10.0,
-            'quality_note': f"慢分{slow_sc:.0f}/100({slow_notes[0] if slow_notes else '通过'})",
+            'quality_note': (
+                f"慢分{slow_sc:.0f}/100({slow_notes[0] if slow_notes else '通过'}"
+                f"{slow_suffix})"
+            ),
             'skip_fast_fund_gate': True,
         }
 
@@ -215,10 +223,8 @@ def _run_bucket_inner(name: str, cfg: dict):
                     snap_row = cast(pd.Series | None, snap_cache.get(f"{stock}:row"))
                     if snap_row is not None:
                         vol_sig, vol_note = volume_signal(df)
-                        if vol_sig == 'negative':
-                            print(f"[{label}] {stock} 量价信号负面({vol_note})，观望")
-                            continue
                     else:
+                        vol_sig = 'neutral'
                         vol_note = ''
 
                     quality = _quality_context(stock, name, snap_row, fund_cache)
@@ -240,6 +246,8 @@ def _run_bucket_inner(name: str, cfg: dict):
                         fast_now, slow_now, fast_prev, slow_prev,
                         ind.extra_buy, snap_row, price,
                         allow_uptrend=allow_uptrend,
+                        bucket_name=name,
+                        quality_score=quality_score,
                     )
                     if signal is None:
                         continue
@@ -248,9 +256,10 @@ def _run_bucket_inner(name: str, cfg: dict):
                         ctx, stock, signal,
                         float(quality['fund_sc']),
                         cast(list, quality['fund_notes']),
+                        vol_sig,
                         vol_note,
                         cfg, name, label, ind.ind_str,
-                        price, atr_val, cash, initial_cash,
+                        df, price, atr_val, cash, initial_cash,
                         no_new_entry=no_new_entry,
                         quality_score=quality_score,
                         skip_fast_fund_gate=bool(quality['skip_fast_fund_gate']),

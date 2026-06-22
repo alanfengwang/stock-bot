@@ -15,6 +15,14 @@ trade_log.csv
 fundamental_cache.json
 sec_ticker_map.json
 signal_stats_cache.json
+runtime_state.json
 
 quantlab/
 quantlab_new/
+bot.out
+dashboard.out
+TradingAgents/
+TradingAgents_repo/
+daily_stock_analysis/
+daily_stock_analysis-main/
+daily_stock_analysis-main.zip

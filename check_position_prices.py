@@ -2,11 +2,18 @@
 诊断：对比持仓股票的 moomoo 快照价格 vs dashboard 显示价格
 用法：python3.14 check_position_prices.py
 """
+import os
+
 from moomoo import OpenQuoteContext, RET_OK
 from local_broker import LocalBroker
 from market_utils import display_price_from_row, live_price_from_row, current_session
 
-broker = LocalBroker('virtual_account.json', 'trade_log.csv')
+BASE = os.path.dirname(__file__)
+BROKER_SQLITE = os.path.join(BASE, 'virtual_account.sqlite3')
+BROKER_SNAPSHOT = os.path.join(BASE, 'virtual_account.json')
+LOG_FILE = os.path.join(BASE, 'trade_log.csv')
+
+broker = LocalBroker(BROKER_SQLITE if os.path.exists(BROKER_SQLITE) else BROKER_SNAPSHOT, LOG_FILE)
 state = broker.get_state()
 
 positions = state['positions']

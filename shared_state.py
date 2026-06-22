@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timedelta
 
 from local_broker import LocalBroker
+from runtime_state import save_runtime_state
 from strategy_config import INITIAL_CASH
 
 # ── 路径 ────────────────────────────────────────────────────
@@ -53,6 +54,7 @@ def set_regime(val: str):
     global _regime
     with _regime_lock:
         _regime = val
+    _persist_runtime_state()
 
 # ── 移动止损高水位 ───────────────────────────────────────────
 _trailing_highs: dict[str, float] = {}
@@ -74,9 +76,52 @@ BOT_START_TS = time.time()
 HEARTBEAT_INTERVAL = 60
 
 
+def _persist_runtime_state():
+    with _worker_lock:
+        beats = {
+            str(name): {
+                'ts': float(info.get('ts', 0.0)),
+                'detail': str(info.get('detail', '')),
+            }
+            for name, info in _worker_beats.items()
+        }
+    with _regime_lock:
+        regime = _regime
+    with _cb_lock:
+        cb_active = _cb_paused_until is not None and datetime.now() < _cb_paused_until
+        cb_status = ''
+        paused_until = ''
+        if _cb_paused_until is not None:
+            paused_until = _cb_paused_until.isoformat()
+            if cb_active:
+                remaining = (_cb_paused_until - datetime.now()).days + 1
+                cb_status = f"熔断中({remaining}天剩余，至{_cb_paused_until.strftime('%m-%d')})"
+        portfolio_hwm = float(_portfolio_hwm)
+    save_runtime_state({
+        'bot_pid': os.getpid(),
+        'bot_start_ts': BOT_START_TS,
+        'updated_ts': time.time(),
+        'regime': regime,
+        'worker_beats': beats,
+        'circuit_breaker': {
+            'active': cb_active,
+            'status': cb_status,
+            'paused_until': paused_until,
+            'portfolio_hwm': portfolio_hwm,
+        },
+    })
+
+
 def mark_worker_beat(name: str, detail: str = ''):
     with _worker_lock:
         _worker_beats[name] = {'ts': time.time(), 'detail': detail}
+    _persist_runtime_state()
+
+
+def get_worker_beats() -> dict:
+    """返回所有线程心跳副本，供 dashboard 展示用。"""
+    with _worker_lock:
+        return dict(_worker_beats)
 
 
 def restore_runtime_state():
@@ -169,6 +214,7 @@ def update_circuit_breaker() -> tuple[bool, str]:
 
         # 已在熔断期内，不重复触发
         if _cb_paused_until is not None and now < _cb_paused_until:
+            _persist_runtime_state()
             return False, ''
 
         if drawdown >= _CB_DRAWDOWN_THRESHOLD:
@@ -177,8 +223,10 @@ def update_circuit_breaker() -> tuple[bool, str]:
                 f"组合回撤{drawdown*100:.1f}%(高水位${_portfolio_hwm:,.0f} → 当前${value:,.0f})，"
                 f"熔断{_CB_PAUSE_DAYS}天至{_cb_paused_until.strftime('%m-%d')}"
             )
+            _persist_runtime_state()
             return True, note
 
+    _persist_runtime_state()
     return False, ''
 
 
@@ -266,3 +314,4 @@ def notify(title: str, msg: str, modal: bool = False):
 
 # 启动时恢复
 restore_runtime_state()
+_persist_runtime_state()
