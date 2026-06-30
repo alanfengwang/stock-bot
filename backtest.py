@@ -1,16 +1,23 @@
 """
 backtest.py — 历史回测引擎
 
-基于 moomoo 历史 K 线，重放共享策略逻辑。
+基于历史 K 线，重放共享策略逻辑。
 说明：
 1. 与 live 端共用事件检测、仓位规则、交易成本函数
 2. 默认加入固定滑点模型（见 strategy_config.py）
 3. 导出回测摘要与交易明细 CSV
 
 用法：
+  # 默认：连接 Futu OpenD 拉最近 252 个交易日
   python3 backtest.py
   python3 backtest.py conservative
   python3 backtest.py longterm 500
+
+  # 本地 CSV 模式（先用 fetch_tv_data.js 下载数据）：
+  python3 backtest.py --local
+  python3 backtest.py --local --from 2025-01-01 --to 2025-06-30
+  python3 backtest.py --local conservative --from 2024-01-01
+
   python3 backtest.py --help
 """
 
@@ -21,10 +28,8 @@ import os
 import sys
 
 import pandas as pd
-from moomoo import OpenQuoteContext
 
-from execution_policy import atr_position_qty, entry_budget
-from market_utils import request_kline
+from execution_policy import atr_position_qty, entry_budget, equity_pct_qty
 from performance import calc_pnl_metrics, closed_trade_pnls
 from strategy_config import (
     ADD_MIN_DAYS,
@@ -44,6 +49,36 @@ from strategy_config import (
 )
 from strategy_signals import calc_atr_value, detect_entry_signal, enrich_indicators, indicator_state
 from trade_costs import apply_slippage, calc_commission
+
+# ── 本地 CSV 数据加载 ──────────────────────────────────────────
+_LOCAL_DATA_DIR = os.path.join(os.path.dirname(__file__), 'historical_data')
+
+
+def load_local_kline(
+    code: str,
+    from_date: str | None = None,
+    to_date: str | None = None,
+) -> pd.DataFrame | None:
+    """
+    从 historical_data/<SYMBOL>_D.csv 加载本地 K 线数据。
+    CSV 格式（由 fetch_tv_data.js 生成）：
+      time_key,open,high,low,close,volume
+    """
+    symbol = code.replace('US.', '').upper()
+    csv_path = os.path.join(_LOCAL_DATA_DIR, f'{symbol}_D.csv')
+    if not os.path.exists(csv_path):
+        return None
+
+    df = pd.read_csv(csv_path, parse_dates=['time_key'])
+    df = df.sort_values('time_key').reset_index(drop=True)
+    df['time_key'] = df['time_key'].astype(str).str[:10]  # 保持 YYYY-MM-DD 字符串
+
+    if from_date:
+        df = df[df['time_key'] >= from_date]
+    if to_date:
+        df = df[df['time_key'] <= to_date]
+
+    return df.reset_index(drop=True) if len(df) > 0 else None
 
 
 def _atr_from_row_or_value(df: pd.DataFrame, idx: int) -> float:
@@ -191,16 +226,14 @@ def backtest_stock(bucket_name: str,
                 and fast_now > slow_now
                 and rsi_ok
             ):
-                budget = entry_budget(
-                    cash, initial_cash, cfg['alloc'],
-                    'pyramid_stage2',
-                    reserve_ratio=CASH_RESERVE,
-                    use_dynamic_alloc=False,    # 回测不使用实时信号统计，避免前视偏差
+                # 金字塔第二批：加仓 30% 原始分配额（Vibe-Trading 权重式）
+                add_qty = equity_pct_qty(
+                    raw_price, initial_cash,
+                    cfg.get('position_pct', 0.60) * 0.30,
                 )
-                add_qty = atr_position_qty(
-                    raw_price, atr_val, budget,
-                    reason='pyramid_stage2',
-                )
+                # 现金不足时缩减到可用最大股数
+                _max_add = int((cash - initial_cash * CASH_RESERVE) / max(raw_price, 0.01))
+                add_qty = min(add_qty, max(_max_add, 0))
                 if add_qty > 0:
                     fill_price = apply_slippage(raw_price, 'BUY', BACKTEST_SLIPPAGE_BPS)
                     cost = fill_price * add_qty
@@ -230,16 +263,13 @@ def backtest_stock(bucket_name: str,
                 and bars_held >= PYRAMID_ADD2_DAYS
                 and fast_now > slow_now
             ):
-                budget = entry_budget(
-                    cash, initial_cash, cfg['alloc'],
-                    'pyramid_stage3',
-                    reserve_ratio=CASH_RESERVE,
-                    use_dynamic_alloc=False,    # 回测不使用实时信号统计，避免前视偏差
+                # 金字塔第三批：加仓 20% 原始分配额（Vibe-Trading 权重式）
+                add_qty = equity_pct_qty(
+                    raw_price, initial_cash,
+                    cfg.get('position_pct', 0.60) * 0.20,
                 )
-                add_qty = atr_position_qty(
-                    raw_price, atr_val, budget,
-                    reason='pyramid_stage3',
-                )
+                _max_add = int((cash - initial_cash * CASH_RESERVE) / max(raw_price, 0.01))
+                add_qty = min(add_qty, max(_max_add, 0))
                 if add_qty > 0:
                     fill_price = apply_slippage(raw_price, 'BUY', BACKTEST_SLIPPAGE_BPS)
                     cost = fill_price * add_qty
@@ -264,15 +294,10 @@ def backtest_stock(bucket_name: str,
 
         elif entry_signal is not None:
             signal_reason, signal_note = entry_signal
-            budget = entry_budget(
-                cash, initial_cash, cfg['alloc'],
-                signal_reason,
-                reserve_ratio=CASH_RESERVE,
-                use_dynamic_alloc=False,    # 回测不使用实时信号统计，避免前视偏差
-            )
-            qty = atr_position_qty(
-                raw_price, atr_val, budget,
-                reason=signal_reason,
+            # Vibe-Trading 权重式仓位：用 per-stock 分配额的 position_pct 建仓
+            qty = equity_pct_qty(
+                raw_price, initial_cash,
+                cfg.get('position_pct', 0.60),
             )
             if qty <= 0:
                 continue
@@ -281,6 +306,13 @@ def backtest_stock(bucket_name: str,
             cost = fill_price * qty
             commission = calc_commission(fill_price, qty)
             min_cash = initial_cash * CASH_RESERVE
+            # 现金不足时缩减股数至可用上限
+            if cash - cost - commission < min_cash:
+                max_affordable = int((cash - min_cash - commission) / max(fill_price, 0.01))
+                if max_affordable <= 0:
+                    continue
+                qty = max_affordable
+                cost = fill_price * qty
             if cash - cost - commission < min_cash:
                 continue
 
@@ -340,16 +372,50 @@ def _write_reports(summary_rows: list[dict], trade_rows: list[dict]) -> tuple[st
     return summary_path, trades_path
 
 
-def run_backtest(bucket_names: list[str], n_periods: int):
-    ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
+def run_backtest(
+    bucket_names: list[str],
+    n_periods: int,
+    local: bool = False,
+    from_date: str | None = None,
+    to_date: str | None = None,
+):
+    # ── 数据源选择 ──────────────────────────────────────────────
+    if local:
+        ctx = None
+        data_src = f"本地 CSV ({_LOCAL_DATA_DIR})"
+        if from_date or to_date:
+            data_src += f"  {from_date or '起始'} → {to_date or '最新'}"
+    else:
+        from moomoo import OpenQuoteContext
+        from market_utils import request_kline
+        ctx = OpenQuoteContext(host='127.0.0.1', port=11111)
+        data_src = "Futu OpenD"
+
     print(f"\n{'=' * 60}")
-    print(f"  回测引擎 | 期间 {n_periods} | 桶：{', '.join(bucket_names)}")
+    print(f"  回测引擎 | 数据源：{data_src}")
+    print(f"  期间 {n_periods} 根 | 桶：{', '.join(bucket_names)}")
     print(f"  初始资金 ${INITIAL_CASH:,.0f} | 现金储备 {CASH_RESERVE * 100:.0f}% | 滑点 {BACKTEST_SLIPPAGE_BPS:.1f} bps")
     print(f"{'=' * 60}\n")
     print("注：回测不重放 snapshot 基本面，只重放价格/均线/量能与仓位逻辑。\n")
 
     summary_rows: list[dict] = []
     trade_rows: list[dict] = []
+
+    def _get_df(code: str) -> pd.DataFrame | None:
+        if local:
+            df = load_local_kline(code, from_date, to_date)
+            if df is None:
+                return None
+            # 本地模式：保留足够的 buffer 行（fetch_tv_data.js 已多拉 70 根）
+            return df if len(df) >= BACKTEST_LOOKBACK_BUFFER else None
+        else:
+            df = request_kline(
+                ctx,
+                code,
+                cfg.get('backtest_ktype', cfg['ktype']),
+                n_periods + BACKTEST_LOOKBACK_BUFFER,
+            )
+            return df if df is not None and len(df) >= BACKTEST_LOOKBACK_BUFFER else None
 
     try:
         for bucket_name in bucket_names:
@@ -363,14 +429,9 @@ def run_backtest(bucket_names: list[str], n_periods: int):
             results = []
 
             for code in stocks:
-                df = request_kline(
-                    ctx,
-                    code,
-                    cfg.get('backtest_ktype', cfg['ktype']),
-                    n_periods + BACKTEST_LOOKBACK_BUFFER,
-                )
-                if df is None or len(df) < BACKTEST_LOOKBACK_BUFFER:
-                    print(f"  {code:14s}  ⚠️  数据不足，跳过")
+                df = _get_df(code)
+                if df is None:
+                    print(f"  {code:14s}  ⚠️  数据不足或文件缺失，跳过")
                     continue
 
                 result = backtest_stock(
@@ -427,7 +488,8 @@ def run_backtest(bucket_names: list[str], n_periods: int):
                 f"  最大回撤：{metrics['max_dd'] * 100:.1f}%  Sharpe（近似）：{metrics['sharpe']:.2f}\n"
             )
     finally:
-        ctx.close()
+        if ctx is not None:
+            ctx.close()
 
     summary_path, trades_path = _write_reports(summary_rows, trade_rows)
     print(f"{'=' * 60}")
@@ -436,16 +498,35 @@ def run_backtest(bucket_names: list[str], n_periods: int):
     print(f"明细: {trades_path}")
 
 
+def _get_flag(name: str) -> str | None:
+    """解析 --name value 形式的命令行参数。"""
+    argv = sys.argv[1:]
+    try:
+        idx = argv.index(name)
+        return argv[idx + 1]
+    except (ValueError, IndexError):
+        return None
+
+
 def main():
     if '--help' in sys.argv:
         print(__doc__)
         return
 
-    args = [a for a in sys.argv[1:] if not a.startswith('-')]
+    use_local  = '--local' in sys.argv
+    from_date  = _get_flag('--from')
+    to_date    = _get_flag('--to')
+
+    # 过滤掉所有 flag 参数，只保留位置参数
+    positional = [
+        a for a in sys.argv[1:]
+        if not a.startswith('--') and a not in (from_date or '', to_date or '')
+    ]
     valid_buckets = list(BUCKETS.keys())
-    bucket_names = [a for a in args if a in valid_buckets] or valid_buckets
-    n_periods = next((int(a) for a in args if a.isdigit()), 252)
-    run_backtest(bucket_names, n_periods)
+    bucket_names  = [a for a in positional if a in valid_buckets] or valid_buckets
+    n_periods     = next((int(a) for a in positional if a.isdigit()), 125 if use_local else 252)
+
+    run_backtest(bucket_names, n_periods, local=use_local, from_date=from_date, to_date=to_date)
 
 
 if __name__ == '__main__':

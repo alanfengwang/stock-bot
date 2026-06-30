@@ -1,0 +1,4139 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<title>回测报告 v2 — 2025 H1</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#e0e0e0;font-family:'Segoe UI',system-ui,sans-serif;font-size:14px}
+h1{text-align:center;padding:24px 0 8px;font-size:22px;color:#fff}
+.sub{text-align:center;color:#888;margin-bottom:24px;font-size:13px}
+.kpi-row{display:flex;gap:16px;padding:0 24px 24px;flex-wrap:wrap;justify-content:center}
+.kpi{background:#1e2130;border-radius:12px;padding:18px 28px;min-width:160px;text-align:center}
+.kpi .val{font-size:28px;font-weight:700;margin-bottom:4px}
+.kpi .lbl{font-size:12px;color:#888;text-transform:uppercase;letter-spacing:.5px}
+.green{color:#4ade80}.red{color:#f87171}.blue{color:#60a5fa}.yellow{color:#facc15}.purple{color:#a78bfa}
+.section{padding:0 24px 28px}
+.section h2{font-size:16px;color:#bbb;margin-bottom:14px;border-left:3px solid #4ECDC4;padding-left:10px}
+.chart-wrap{background:#1e2130;border-radius:12px;padding:20px;margin-bottom:16px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px}
+.bucket-card{background:#1e2130;border-radius:12px;padding:18px}
+.bucket-card .name{font-weight:700;font-size:15px;margin-bottom:12px}
+.bucket-card .row{display:flex;justify-content:space-between;margin-bottom:6px;font-size:13px}
+.bucket-card .row .k{color:#888}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{background:#1a1d2e;padding:8px 12px;text-align:left;color:#888;font-weight:500;position:sticky;top:0}
+td{padding:7px 12px;border-bottom:1px solid #252836}
+tr:hover td{background:#1a1d2e}
+.tbl-wrap{background:#1e2130;border-radius:12px;overflow:auto;max-height:480px}
+input[type=text]{background:#1a1d2e;border:1px solid #333;color:#eee;padding:7px 12px;border-radius:8px;font-size:13px;width:100%;margin-bottom:12px}
+.tag{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.tag-conservative{background:#1a3a3a;color:#4ECDC4}
+.tag-longterm{background:#1a2a3a;color:#45B7D1}
+.tag-shortterm{background:#3a1a1a;color:#FF6B6B}
+</style>
+</head>
+<body>
+<h1>📊 量化回测报告 v2</h1>
+<p class="sub">策略：三桶（保守/成长/短线）｜ 数据：TradingView ｜ 2025-01-01 → 2025-06-30<br>
+改进：Vibe-Trading 权重式仓位（position_pct） + ADX 趋势过滤（防假金叉）</p>
+
+<div class="kpi-row" id="kpiRow"></div>
+
+<div class="section">
+<h2>权益曲线（累计盈亏）</h2>
+<div class="chart-wrap"><canvas id="eqChart" height="90"></canvas></div>
+</div>
+
+<div class="section">
+<h2>三桶对比</h2>
+<div class="grid3" id="bucketCards"></div>
+</div>
+
+<div class="section">
+<h2>Top 股票 vs 垫底股票</h2>
+<div class="grid2">
+  <div class="chart-wrap"><canvas id="topChart"></canvas></div>
+  <div class="chart-wrap"><canvas id="botChart"></canvas></div>
+</div>
+</div>
+
+<div class="section">
+<h2>信号分布</h2>
+<div class="grid2">
+  <div class="chart-wrap"><canvas id="entryChart"></canvas></div>
+  <div class="chart-wrap"><canvas id="exitChart"></canvas></div>
+</div>
+</div>
+
+<div class="section">
+<h2>交易明细（364 笔）</h2>
+<input type="text" id="filterInput" placeholder="搜索股票、桶、信号...">
+<div class="tbl-wrap">
+<table id="tradeTable">
+<thead><tr>
+  <th>日期</th><th>股票</th><th>桶</th><th>操作</th><th>价格</th><th>股数</th><th>盈亏</th><th>原因</th>
+</tr></thead>
+<tbody id="tradeBody"></tbody>
+</table>
+</div>
+</div>
+
+<script>
+const D = {
+  "total_pnl": 195806,
+  "ret_pct": 19.58,
+  "win_rate": 73,
+  "trade_cnt": 364,
+  "best_stock": "STX",
+  "best_pnl": 14389,
+  "equity_dates": [
+    "2025-03-10",
+    "2025-03-12",
+    "2025-03-14",
+    "2025-03-17",
+    "2025-03-18",
+    "2025-03-19",
+    "2025-03-20",
+    "2025-03-24",
+    "2025-03-25",
+    "2025-03-26",
+    "2025-03-27",
+    "2025-03-28",
+    "2025-03-31",
+    "2025-04-01",
+    "2025-04-02",
+    "2025-04-03",
+    "2025-04-04",
+    "2025-04-08",
+    "2025-04-15",
+    "2025-04-16",
+    "2025-04-17",
+    "2025-04-21",
+    "2025-04-22",
+    "2025-04-24",
+    "2025-04-25",
+    "2025-04-28",
+    "2025-04-29",
+    "2025-04-30",
+    "2025-05-01",
+    "2025-05-02",
+    "2025-05-05",
+    "2025-05-06",
+    "2025-05-07",
+    "2025-05-08",
+    "2025-05-09",
+    "2025-05-12",
+    "2025-05-13",
+    "2025-05-14",
+    "2025-05-15",
+    "2025-05-16",
+    "2025-05-19",
+    "2025-05-21",
+    "2025-05-22",
+    "2025-05-23",
+    "2025-05-27",
+    "2025-05-28",
+    "2025-05-30",
+    "2025-06-02",
+    "2025-06-03",
+    "2025-06-04",
+    "2025-06-05",
+    "2025-06-09",
+    "2025-06-10",
+    "2025-06-11",
+    "2025-06-12",
+    "2025-06-13",
+    "2025-06-16",
+    "2025-06-17",
+    "2025-06-18",
+    "2025-06-20",
+    "2025-06-23",
+    "2025-06-24",
+    "2025-06-25",
+    "2025-06-26",
+    "2025-06-27",
+    "2025-06-30"
+  ],
+  "equity_vals": [
+    -2826.65,
+    -3402.14,
+    -2931.73,
+    -2737.43,
+    -2524.19,
+    -3150.99,
+    -2127.48,
+    -1069.7,
+    -784.82,
+    -11720.31,
+    -20859.95,
+    -29930.57,
+    -34408.96,
+    -35268.12,
+    -34709.52,
+    -37956.93,
+    -42383.79,
+    -43416.07,
+    -43725.18,
+    -45849.46,
+    -46479.36,
+    -48274.83,
+    -47936.41,
+    -46922.46,
+    -43677.16,
+    -42670.03,
+    -43275.89,
+    -42405.82,
+    -41867.64,
+    -35501.24,
+    -35748.73,
+    -35426.37,
+    -35285.96,
+    -31024.1,
+    -31094.63,
+    3156.54,
+    7644.38,
+    9800.94,
+    9932.24,
+    9574.92,
+    8813.04,
+    7710.03,
+    11162.69,
+    17181.9,
+    20317.01,
+    21046.5,
+    17694.84,
+    18817.51,
+    25064.72,
+    29154.59,
+    36364.02,
+    47355.29,
+    56055.22,
+    58326.36,
+    60027.05,
+    59846.78,
+    63189.99,
+    59576.19,
+    59312.08,
+    63846.26,
+    73145.85,
+    75694.07,
+    74690.79,
+    82308.43,
+    85092.94,
+    195806.28
+  ],
+  "bucket_data": [
+    {
+      "name": "保守",
+      "win_rate": 84.0,
+      "profit_factor": 3.36,
+      "sharpe": 7.12,
+      "total_pnl": 26461,
+      "ann_ret": 5.4
+    },
+    {
+      "name": "成长",
+      "win_rate": 77.7,
+      "profit_factor": 3.79,
+      "sharpe": 6.83,
+      "total_pnl": 102745,
+      "ann_ret": 24.7
+    },
+    {
+      "name": "短线",
+      "win_rate": 66.8,
+      "profit_factor": 2.38,
+      "sharpe": 3.93,
+      "total_pnl": 66601,
+      "ann_ret": 18.7
+    }
+  ],
+  "top_stocks": [
+    {
+      "sym": "STX",
+      "pnl": 14390,
+      "bucket": "longterm",
+      "color": "#45B7D1"
+    },
+    {
+      "sym": "WDC",
+      "pnl": 11687,
+      "bucket": "longterm",
+      "color": "#45B7D1"
+    },
+    {
+      "sym": "MU",
+      "pnl": 10090,
+      "bucket": "longterm",
+      "color": "#45B7D1"
+    },
+    {
+      "sym": "OKLO",
+      "pnl": 8386,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "AVAV",
+      "pnl": 7714,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "AMD",
+      "pnl": 7115,
+      "bucket": "longterm",
+      "color": "#45B7D1"
+    },
+    {
+      "sym": "LRCX",
+      "pnl": 5883,
+      "bucket": "longterm",
+      "color": "#45B7D1"
+    },
+    {
+      "sym": "CCJ",
+      "pnl": 5739,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "NET",
+      "pnl": 5437,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "KTOS",
+      "pnl": 5400,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    }
+  ],
+  "bot_stocks": [
+    {
+      "sym": "APP",
+      "pnl": -1376,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "PANW",
+      "pnl": -1411,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "AEP",
+      "pnl": -1718,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "AI",
+      "pnl": -1951,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "FSLR",
+      "pnl": -2319,
+      "bucket": "shortterm",
+      "color": "#FF6B6B"
+    },
+    {
+      "sym": "MA",
+      "pnl": -2712,
+      "bucket": "conservative",
+      "color": "#4ECDC4"
+    },
+    {
+      "sym": "ADBE",
+      "pnl": -3173,
+      "bucket": "conservative",
+      "color": "#4ECDC4"
+    },
+    {
+      "sym": "ENTG",
+      "pnl": -4606,
+      "bucket": "longterm",
+      "color": "#45B7D1"
+    }
+  ],
+  "signal_cnt": {
+    "pyramid_stage2": 98,
+    "trend_pullback": 95,
+    "golden_cross": 93,
+    "pyramid_stage3": 58,
+    "breakout": 9
+  },
+  "sell_reason_cnt": {
+    "profit_take1": 99,
+    "stop_loss": 77,
+    "profit_take2": 68,
+    "end_of_backtest": 52,
+    "rsi_overbought": 26,
+    "trailing_stop": 26,
+    "death_cross": 16
+  },
+  "trades": [
+    {
+      "date": "2025-03-10",
+      "sym": "ADI",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 216.15,
+      "qty": 112,
+      "pnl": -1511.74,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-10",
+      "sym": "ASTS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 29.13,
+      "qty": 427,
+      "pnl": -1314.9,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-12",
+      "sym": "AEP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 102.91,
+      "qty": 128,
+      "pnl": -575.49,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-14",
+      "sym": "MP",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 26.82,
+      "qty": 165,
+      "pnl": 299.65,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-14",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 30.41,
+      "qty": 141,
+      "pnl": 170.76,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-17",
+      "sym": "AEP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 105.81,
+      "qty": 131,
+      "pnl": 194.3,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-03-18",
+      "sym": "NOK",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 5.42,
+      "qty": 1030,
+      "pnl": 213.24,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-19",
+      "sym": "INTC",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 24.11,
+      "qty": 1000,
+      "pnl": -1832.25,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-19",
+      "sym": "GLD",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 280.97,
+      "qty": 33,
+      "pnl": 375.07,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-19",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 32.54,
+      "qty": 279,
+      "pnl": 830.38,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-03-20",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 4.27,
+      "qty": 1494,
+      "pnl": 597.08,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-03-20",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 4.27,
+      "qty": 1067,
+      "pnl": 426.43,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-24",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 73.59,
+      "qty": 60,
+      "pnl": 282.4,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-24",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 113.79,
+      "qty": 73,
+      "pnl": 545.74,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-24",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 22.27,
+      "qty": 196,
+      "pnl": 229.64,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-25",
+      "sym": "CRWD",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 384.76,
+      "qty": 11,
+      "pnl": 244.43,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-25",
+      "sym": "ZS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 215.62,
+      "qty": 20,
+      "pnl": 230.11,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-25",
+      "sym": "AEP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 102.45,
+      "qty": 129,
+      "pnl": -448.26,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-03-25",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 42.99,
+      "qty": 102,
+      "pnl": 258.61,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "OKLO",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 26.36,
+      "qty": 475,
+      "pnl": -1232.89,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 19.48,
+      "qty": 645,
+      "pnl": -1172.88,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "ENTG",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 92.39,
+      "qty": 261,
+      "pnl": -1757.43,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "VST",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 123.95,
+      "qty": 105,
+      "pnl": -707.12,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 66.08,
+      "qty": 197,
+      "pnl": -683.02,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "COHR",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 71.45,
+      "qty": 337,
+      "pnl": -1791.34,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "FN",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 208.65,
+      "qty": 59,
+      "pnl": -1348.9,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "NVDA",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 113.7,
+      "qty": 213,
+      "pnl": -1661.76,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-26",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 19.43,
+      "qty": 678,
+      "pnl": -580.15,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-27",
+      "sym": "TSM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 168.16,
+      "qty": 143,
+      "pnl": -1842.56,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-27",
+      "sym": "LRCX",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 74.77,
+      "qty": 332,
+      "pnl": -1088.57,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-03-27",
+      "sym": "CCJ",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 42.61,
+      "qty": 401,
+      "pnl": -787.66,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-27",
+      "sym": "APP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 261.57,
+      "qty": 40,
+      "pnl": -3135.97,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-27",
+      "sym": "IBM",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 246.09,
+      "qty": 162,
+      "pnl": -649.92,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-03-27",
+      "sym": "AI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 22.52,
+      "qty": 585,
+      "pnl": -579.01,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-27",
+      "sym": "PANW",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 174.35,
+      "qty": 95,
+      "pnl": -1055.95,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-28",
+      "sym": "KLAC",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 67.33,
+      "qty": 356,
+      "pnl": -1959.16,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-28",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 107.75,
+      "qty": 225,
+      "pnl": -1636.58,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-28",
+      "sym": "MPWR",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 579.6,
+      "qty": 48,
+      "pnl": -1578.89,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-28",
+      "sym": "CEG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 205.29,
+      "qty": 63,
+      "pnl": -746.72,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-28",
+      "sym": "GLW",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 45.84,
+      "qty": 534,
+      "pnl": -1458.33,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-28",
+      "sym": "AXON",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 534.68,
+      "qty": 31,
+      "pnl": -761.8,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-28",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 38.4,
+      "qty": 333,
+      "pnl": -929.14,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-31",
+      "sym": "DDOG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 99.16,
+      "qty": 131,
+      "pnl": -756.1,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-31",
+      "sym": "TSLA",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 259.03,
+      "qty": 50,
+      "pnl": -662.17,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-31",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 102.69,
+      "qty": 239,
+      "pnl": -1384.86,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-31",
+      "sym": "MP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 24.4,
+      "qty": 538,
+      "pnl": -607.08,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-31",
+      "sym": "ZS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 198.32,
+      "qty": 66,
+      "pnl": -606.12,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-03-31",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 3.78,
+      "qty": 1989,
+      "pnl": -462.07,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-01",
+      "sym": "QCOM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 152.97,
+      "qty": 161,
+      "pnl": -1164.43,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-04-01",
+      "sym": "NOK",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 5.34,
+      "qty": 2402,
+      "pnl": 305.27,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-04-02",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 31.14,
+      "qty": 270,
+      "pnl": 172.34,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-04-02",
+      "sym": "TSLA",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 282.62,
+      "qty": 15,
+      "pnl": 209.09,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-02",
+      "sym": "NRG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 102.83,
+      "qty": 42,
+      "pnl": 177.17,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-03",
+      "sym": "ZS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 192.11,
+      "qty": 66,
+      "pnl": -995.76,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-03",
+      "sym": "CRWD",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 347.22,
+      "qty": 26,
+      "pnl": -398.03,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-03",
+      "sym": "NRG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 92.72,
+      "qty": 97,
+      "pnl": -570.7,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-03",
+      "sym": "LUNR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 7.54,
+      "qty": 1655,
+      "pnl": -1282.93,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-04",
+      "sym": "AEP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 104.43,
+      "qty": 125,
+      "pnl": -616.03,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-04",
+      "sym": "TSLA",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 239.31,
+      "qty": 36,
+      "pnl": -1056.81,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-04",
+      "sym": "GLD",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 279.58,
+      "qty": 76,
+      "pnl": 758.24,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-04-04",
+      "sym": "INTU",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 561.25,
+      "qty": 66,
+      "pnl": -3512.26,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-08",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 120.32,
+      "qty": 105,
+      "pnl": -1032.29,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-15",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 21.06,
+      "qty": 210,
+      "pnl": 296.8,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-15",
+      "sym": "AVAV",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 139.93,
+      "qty": 93,
+      "pnl": -605.91,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-16",
+      "sym": "LUNR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 7.56,
+      "qty": 1778,
+      "pnl": -311.0,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-04-16",
+      "sym": "NVDA",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 104.44,
+      "qty": 231,
+      "pnl": -1813.28,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-17",
+      "sym": "MP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 26.34,
+      "qty": 498,
+      "pnl": -629.9,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-21",
+      "sym": "GLD",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 315.43,
+      "qty": 31,
+      "pnl": 491.5,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-21",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 18.64,
+      "qty": 490,
+      "pnl": -492.32,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-21",
+      "sym": "ZS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 193.6,
+      "qty": 67,
+      "pnl": -750.22,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-21",
+      "sym": "CEG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 192.51,
+      "qty": 65,
+      "pnl": -1044.44,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-22",
+      "sym": "AVAV",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 150.1,
+      "qty": 28,
+      "pnl": 172.98,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-22",
+      "sym": "NOK",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 5.28,
+      "qty": 814,
+      "pnl": 165.44,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-24",
+      "sym": "ZS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 210.03,
+      "qty": 20,
+      "pnl": 185.63,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-24",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 136.37,
+      "qty": 31,
+      "pnl": 160.12,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-24",
+      "sym": "CCJ",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 43.87,
+      "qty": 98,
+      "pnl": 182.66,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-24",
+      "sym": "NOK",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 4.86,
+      "qty": 1898,
+      "pnl": -410.77,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-24",
+      "sym": "CRWD",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 413.84,
+      "qty": 10,
+      "pnl": 277.76,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-24",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 21.87,
+      "qty": 203,
+      "pnl": 317.16,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-24",
+      "sym": "NRG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 106.06,
+      "qty": 42,
+      "pnl": 301.38,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "CEG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 222.88,
+      "qty": 20,
+      "pnl": 258.13,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "VST",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 126.58,
+      "qty": 34,
+      "pnl": 221.98,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "CRWD",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 424.67,
+      "qty": 15,
+      "pnl": 578.96,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "AXON",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 603.48,
+      "qty": 7,
+      "pnl": 182.76,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 141.79,
+      "qty": 44,
+      "pnl": 465.56,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "CIEN",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 65.91,
+      "qty": 124,
+      "pnl": 407.46,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 22.37,
+      "qty": 284,
+      "pnl": 585.6,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-04-25",
+      "sym": "NRG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 108.28,
+      "qty": 58,
+      "pnl": 544.85,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-04-28",
+      "sym": "ZS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 219.75,
+      "qty": 29,
+      "pnl": 550.82,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-04-28",
+      "sym": "VST",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 129.56,
+      "qty": 48,
+      "pnl": 456.3,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-04-29",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 4.07,
+      "qty": 3190,
+      "pnl": -782.86,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-29",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 34.4,
+      "qty": 125,
+      "pnl": 177.0,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "LUNR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 8.2,
+      "qty": 1602,
+      "pnl": -626.14,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 36.01,
+      "qty": 365,
+      "pnl": -601.39,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "STX",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 90.98,
+      "qty": 131,
+      "pnl": 1031.71,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "STX",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 90.98,
+      "qty": 94,
+      "pnl": 740.31,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "APP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 269.18,
+      "qty": 48,
+      "pnl": -769.34,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 125.76,
+      "qty": 58,
+      "pnl": -595.29,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "WDC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 43.84,
+      "qty": 194,
+      "pnl": 705.16,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-04-30",
+      "sym": "WDC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 43.84,
+      "qty": 271,
+      "pnl": 985.04,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-01",
+      "sym": "CIEN",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 71.39,
+      "qty": 244,
+      "pnl": 1867.55,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-01",
+      "sym": "DDOG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 106.27,
+      "qty": 40,
+      "pnl": 186.57,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-01",
+      "sym": "TSM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 172.63,
+      "qty": 47,
+      "pnl": 347.77,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-01",
+      "sym": "CEG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 240.49,
+      "qty": 38,
+      "pnl": 996.51,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-01",
+      "sym": "SAP",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 288.79,
+      "qty": 139,
+      "pnl": -505.57,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-01",
+      "sym": "QCOM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 135.14,
+      "qty": 174,
+      "pnl": -2354.64,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "LUNR",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 9.3,
+      "qty": 478,
+      "pnl": 319.42,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "ENTG",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 83.37,
+      "qty": 97,
+      "pnl": 334.98,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "SNDK",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 34.38,
+      "qty": 238,
+      "pnl": 420.35,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "AVAV",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 158.71,
+      "qty": 56,
+      "pnl": 725.23,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 36.27,
+      "qty": 247,
+      "pnl": 706.8,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 123.21,
+      "qty": 97,
+      "pnl": 1077.22,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 123.21,
+      "qty": 69,
+      "pnl": 766.27,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 4.34,
+      "qty": 994,
+      "pnl": 183.35,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "MRVL",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 62.3,
+      "qty": 151,
+      "pnl": 494.87,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "NOW",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 195.37,
+      "qty": 22,
+      "pnl": 165.17,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "CCJ",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 46.99,
+      "qty": 192,
+      "pnl": 773.43,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-02",
+      "sym": "NVDA",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 114.44,
+      "qty": 71,
+      "pnl": 399.31,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-05",
+      "sym": "ASTS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 24.74,
+      "qty": 520,
+      "pnl": -885.56,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-05",
+      "sym": "NET",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 124.58,
+      "qty": 44,
+      "pnl": 210.17,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-05",
+      "sym": "MSFT",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 435.95,
+      "qty": 93,
+      "pnl": 30.08,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-05",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 100.54,
+      "qty": 80,
+      "pnl": 325.71,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-05",
+      "sym": "MA",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 560.84,
+      "qty": 72,
+      "pnl": 72.11,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-06",
+      "sym": "OKLO",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 28.65,
+      "qty": 157,
+      "pnl": 363.29,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-06",
+      "sym": "OKLO",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 28.65,
+      "qty": 219,
+      "pnl": 506.75,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-06",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 13.93,
+      "qty": 934,
+      "pnl": -736.46,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-06",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 64.39,
+      "qty": 67,
+      "pnl": 188.79,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-07",
+      "sym": "MU",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 82.58,
+      "qty": 99,
+      "pnl": 391.51,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-07",
+      "sym": "AVGO",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 204.71,
+      "qty": 199,
+      "pnl": 179.97,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-07",
+      "sym": "MP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 23.61,
+      "qty": 549,
+      "pnl": -780.35,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-07",
+      "sym": "LRCX",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 75.02,
+      "qty": 108,
+      "pnl": 349.28,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-08",
+      "sym": "AXON",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 686.49,
+      "qty": 16,
+      "pnl": 1524.81,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-08",
+      "sym": "SNDK",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 36.64,
+      "qty": 472,
+      "pnl": 1728.9,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-08",
+      "sym": "APP",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 339.34,
+      "qty": 13,
+      "pnl": 409.56,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-08",
+      "sym": "APP",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 339.34,
+      "qty": 19,
+      "pnl": 598.59,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "V",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 352.36,
+      "qty": 116,
+      "pnl": 399.47,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "ENTG",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 76.32,
+      "qty": 320,
+      "pnl": -1480.37,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "AEP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 104.63,
+      "qty": 129,
+      "pnl": -177.59,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "TSLA",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 298.11,
+      "qty": 14,
+      "pnl": 167.98,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 20.5,
+      "qty": 490,
+      "pnl": -657.67,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "INTC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 21.41,
+      "qty": 379,
+      "pnl": 334.51,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "NET",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 132.27,
+      "qty": 62,
+      "pnl": 773.16,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "NOK",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 5.09,
+      "qty": 2717,
+      "pnl": 63.57,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-05-09",
+      "sym": "ADI",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 207.41,
+      "qty": 43,
+      "pnl": 506.4,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "KLAC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 76.01,
+      "qty": 110,
+      "pnl": 625.02,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "MPWR",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 708.88,
+      "qty": 17,
+      "pnl": 1214.72,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "MPWR",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 708.88,
+      "qty": 12,
+      "pnl": 857.45,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "TER",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 83.02,
+      "qty": 101,
+      "pnl": 618.64,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "COHR",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 77.73,
+      "qty": 157,
+      "pnl": 1335.0,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 18.23,
+      "qty": 391,
+      "pnl": 1352.09,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 18.23,
+      "qty": 279,
+      "pnl": 964.79,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "META",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 639.11,
+      "qty": 48,
+      "pnl": 2214.35,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "KLAC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 76.01,
+      "qty": 155,
+      "pnl": 880.72,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "TSLA",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 318.22,
+      "qty": 28,
+      "pnl": 802.94,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "QCOM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 152.04,
+      "qty": 53,
+      "pnl": 361.77,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "LRCX",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 82.21,
+      "qty": 214,
+      "pnl": 2023.24,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "TER",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 83.02,
+      "qty": 142,
+      "pnl": 869.77,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "META",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 639.11,
+      "qty": 20,
+      "pnl": 922.65,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "ASTS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 27.15,
+      "qty": 160,
+      "pnl": 218.46,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "NXPI",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 206.93,
+      "qty": 41,
+      "pnl": 763.84,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "GLW",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 46.95,
+      "qty": 190,
+      "pnl": 495.59,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "COHR",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 77.73,
+      "qty": 112,
+      "pnl": 952.36,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "LUNR",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 9.5,
+      "qty": 946,
+      "pnl": 723.36,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "TSM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 186.89,
+      "qty": 93,
+      "pnl": 1807.41,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "NVDA",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 122.94,
+      "qty": 140,
+      "pnl": 1745.01,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "NXPI",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 206.93,
+      "qty": 58,
+      "pnl": 1080.56,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "MU",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 92.24,
+      "qty": 223,
+      "pnl": 2601.9,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 71.69,
+      "qty": 132,
+      "pnl": 1224.67,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 108.07,
+      "qty": 159,
+      "pnl": 1649.52,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "MRVL",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 64.47,
+      "qty": 211,
+      "pnl": 1149.0,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "DDOG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 113.36,
+      "qty": 80,
+      "pnl": 830.91,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "AI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 24.19,
+      "qty": 235,
+      "pnl": 324.9,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "AMAT",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 167.91,
+      "qty": 51,
+      "pnl": 827.72,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "ADI",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 223.04,
+      "qty": 60,
+      "pnl": 1644.25,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-12",
+      "sym": "AMAT",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 167.91,
+      "qty": 72,
+      "pnl": 1168.55,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-13",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 191.5,
+      "qty": 26,
+      "pnl": 914.12,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-13",
+      "sym": "FN",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 227.22,
+      "qty": 19,
+      "pnl": 221.36,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-13",
+      "sym": "NOW",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 207.24,
+      "qty": 43,
+      "pnl": 735.58,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-13",
+      "sym": "INTC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 22.55,
+      "qty": 749,
+      "pnl": 1315.9,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-13",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 191.5,
+      "qty": 37,
+      "pnl": 1300.87,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-14",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 24.12,
+      "qty": 189,
+      "pnl": 428.99,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-14",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 33.51,
+      "qty": 239,
+      "pnl": -193.35,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-05-14",
+      "sym": "ADBE",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 399.27,
+      "qty": 102,
+      "pnl": 158.28,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-14",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 44.98,
+      "qty": 106,
+      "pnl": 641.78,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-14",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 44.98,
+      "qty": 148,
+      "pnl": 896.08,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-14",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 24.12,
+      "qty": 264,
+      "pnl": 599.22,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-14",
+      "sym": "CSCO",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 61.26,
+      "qty": 657,
+      "pnl": -374.43,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-15",
+      "sym": "HPQ",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 28.77,
+      "qty": 1417,
+      "pnl": 131.29,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-16",
+      "sym": "ENTG",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 78.2,
+      "qty": 314,
+      "pnl": -1335.69,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-16",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 4.71,
+      "qty": 1961,
+      "pnl": 978.37,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-19",
+      "sym": "ASTS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 24.6,
+      "qty": 527,
+      "pnl": -761.88,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-21",
+      "sym": "DDOG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 113.63,
+      "qty": 77,
+      "pnl": 567.71,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-21",
+      "sym": "AI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 21.86,
+      "qty": 548,
+      "pnl": -518.17,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-21",
+      "sym": "PANW",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 181.17,
+      "qty": 93,
+      "pnl": -819.59,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-21",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 163.29,
+      "qty": 47,
+      "pnl": -332.96,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-22",
+      "sym": "GOOGL",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 170.78,
+      "qty": 74,
+      "pnl": 495.16,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-22",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 110.65,
+      "qty": 153,
+      "pnl": 1489.03,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-22",
+      "sym": "ADI",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 211.82,
+      "qty": 63,
+      "pnl": 383.2,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-22",
+      "sym": "SNDK",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 37.82,
+      "qty": 439,
+      "pnl": 1085.27,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "INTU",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 719.77,
+      "qty": 17,
+      "pnl": 903.57,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "LRCX",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 81.02,
+      "qty": 205,
+      "pnl": 1092.04,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "INTU",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 719.77,
+      "qty": 25,
+      "pnl": 1328.77,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 40.07,
+      "qty": 188,
+      "pnl": -430.55,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 127.12,
+      "qty": 168,
+      "pnl": 1225.23,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "INTU",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 719.77,
+      "qty": 18,
+      "pnl": 956.72,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "MU",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 93.32,
+      "qty": 149,
+      "pnl": 1899.28,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-23",
+      "sym": "INTC",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 20.04,
+      "qty": 728,
+      "pnl": -955.85,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-27",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 39.62,
+      "qty": 141,
+      "pnl": 232.93,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-27",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 38.1,
+      "qty": 164,
+      "pnl": 470.99,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-27",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 38.1,
+      "qty": 117,
+      "pnl": 336.01,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-05-27",
+      "sym": "GLW",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 49.9,
+      "qty": 332,
+      "pnl": 1629.34,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-05-27",
+      "sym": "MSFT",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 460.46,
+      "qty": 89,
+      "pnl": 465.83,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-28",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 116.09,
+      "qty": 209,
+      "pnl": -1666.75,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-28",
+      "sym": "ADBE",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 412.02,
+      "qty": 98,
+      "pnl": -137.81,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-28",
+      "sym": "GOOGL",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 172.27,
+      "qty": 244,
+      "pnl": 1505.1,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-28",
+      "sym": "ORCL",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 163.77,
+      "qty": 250,
+      "pnl": 432.0,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-28",
+      "sym": "AVGO",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 239.31,
+      "qty": 172,
+      "pnl": 596.95,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-30",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 72.24,
+      "qty": 126,
+      "pnl": 882.15,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-05-30",
+      "sym": "AI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 26.58,
+      "qty": 494,
+      "pnl": -615.11,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-30",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 124.48,
+      "qty": 193,
+      "pnl": -1850.21,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-30",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 15.41,
+      "qty": 608,
+      "pnl": -1350.49,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-05-30",
+      "sym": "META",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 647.17,
+      "qty": 63,
+      "pnl": 272.85,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-05-30",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 4.33,
+      "qty": 1891,
+      "pnl": -59.55,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-05-30",
+      "sym": "SNDK",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 37.67,
+      "qty": 672,
+      "pnl": -631.3,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-06-02",
+      "sym": "LUNR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 11.0,
+      "qty": 919,
+      "pnl": 1864.74,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-02",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 149.58,
+      "qty": 86,
+      "pnl": -742.07,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-03",
+      "sym": "NOW",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 202.07,
+      "qty": 42,
+      "pnl": 275.7,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-03",
+      "sym": "FN",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 239.75,
+      "qty": 44,
+      "pnl": 846.88,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-03",
+      "sym": "MU",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 102.2,
+      "qty": 80,
+      "pnl": 459.2,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-03",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 150.4,
+      "qty": 64,
+      "pnl": 1926.37,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-03",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 150.4,
+      "qty": 91,
+      "pnl": 2739.06,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-04",
+      "sym": "SAP",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 309.17,
+      "qty": 41,
+      "pnl": 513.09,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-04",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 44.11,
+      "qty": 128,
+      "pnl": 274.13,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-04",
+      "sym": "SAP",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 309.17,
+      "qty": 96,
+      "pnl": 1201.38,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-04",
+      "sym": "TSLA",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 331.88,
+      "qty": 27,
+      "pnl": 910.34,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-04",
+      "sym": "CRWD",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 460.33,
+      "qty": 25,
+      "pnl": 1190.94,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-05",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 81.6,
+      "qty": 53,
+      "pnl": 205.95,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-05",
+      "sym": "CEG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 289.74,
+      "qty": 36,
+      "pnl": 2351.15,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-05",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 41.67,
+      "qty": 238,
+      "pnl": 762.93,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-05",
+      "sym": "CIEN",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 73.01,
+      "qty": 233,
+      "pnl": 1509.62,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-05",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 134.98,
+      "qty": 60,
+      "pnl": 880.91,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-05",
+      "sym": "MP",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 25.92,
+      "qty": 168,
+      "pnl": 221.25,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-05",
+      "sym": "MU",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 106.24,
+      "qty": 158,
+      "pnl": 1277.6,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "NRG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 154.97,
+      "qty": 101,
+      "pnl": 4933.07,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "ASTS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 34.8,
+      "qty": 134,
+      "pnl": 526.18,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "ASTS",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 34.8,
+      "qty": 187,
+      "pnl": 734.3,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 138.54,
+      "qty": 68,
+      "pnl": 625.1,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "LRCX",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 88.26,
+      "qty": 92,
+      "pnl": 390.76,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "ADI",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 227.55,
+      "qty": 36,
+      "pnl": 418.32,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "AEP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 101.36,
+      "qty": 135,
+      "pnl": -77.23,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "MP",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 27.68,
+      "qty": 235,
+      "pnl": 722.76,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "APP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 383.41,
+      "qty": 31,
+      "pnl": 1521.13,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "AMZN",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 216.87,
+      "qty": 72,
+      "pnl": 671.76,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-09",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 121.67,
+      "qty": 84,
+      "pnl": 525.11,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-10",
+      "sym": "IBM",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 276.1,
+      "qty": 56,
+      "pnl": 623.51,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-10",
+      "sym": "AMZN",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 217.5,
+      "qty": 168,
+      "pnl": 1673.2,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-10",
+      "sym": "GOOGL",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 178.51,
+      "qty": 233,
+      "pnl": 1092.84,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-10",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 140.56,
+      "qty": 94,
+      "pnl": 1053.84,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-10",
+      "sym": "VST",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 164.57,
+      "qty": 82,
+      "pnl": 2982.31,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-10",
+      "sym": "QCOM",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 159.05,
+      "qty": 106,
+      "pnl": 1274.23,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-11",
+      "sym": "AI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 24.64,
+      "qty": 535,
+      "pnl": -563.11,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-11",
+      "sym": "V",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 373.12,
+      "qty": 112,
+      "pnl": 1168.18,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-11",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 43.19,
+      "qty": 297,
+      "pnl": 363.04,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-06-11",
+      "sym": "MSFT",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 472.38,
+      "qty": 88,
+      "pnl": 1173.27,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-11",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 149.63,
+      "qty": 159,
+      "pnl": -2003.53,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-11",
+      "sym": "IBM",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 281.38,
+      "qty": 130,
+      "pnl": 2133.28,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-12",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 85.46,
+      "qty": 104,
+      "pnl": 691.33,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-12",
+      "sym": "INTU",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 765.83,
+      "qty": 53,
+      "pnl": 24.63,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-12",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 26.39,
+      "qty": 443,
+      "pnl": 984.73,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-13",
+      "sym": "NOK",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 5.19,
+      "qty": 3413,
+      "pnl": -180.27,
+      "reason": "death_cross"
+    },
+    {
+      "date": "2025-06-16",
+      "sym": "LRCX",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 93.36,
+      "qty": 216,
+      "pnl": 1530.47,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-16",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 126.33,
+      "qty": 117,
+      "pnl": 1276.19,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-16",
+      "sym": "SNDK",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 44.19,
+      "qty": 188,
+      "pnl": 536.55,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-17",
+      "sym": "DDOG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 124.78,
+      "qty": 45,
+      "pnl": 277.28,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-17",
+      "sym": "CRWD",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 491.78,
+      "qty": 9,
+      "pnl": 213.77,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-17",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 171.84,
+      "qty": 49,
+      "pnl": 647.45,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-17",
+      "sym": "FSLR",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 143.83,
+      "qty": 78,
+      "pnl": -2457.21,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-17",
+      "sym": "ADBE",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 382.49,
+      "qty": 97,
+      "pnl": -3193.59,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-17",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 171.84,
+      "qty": 68,
+      "pnl": 898.5,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-18",
+      "sym": "VST",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 181.04,
+      "qty": 24,
+      "pnl": 168.68,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-18",
+      "sym": "MA",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 538.46,
+      "qty": 70,
+      "pnl": -2783.89,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-18",
+      "sym": "SNDK",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 46.6,
+      "qty": 369,
+      "pnl": 1646.93,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-18",
+      "sym": "DDOG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 129.97,
+      "qty": 62,
+      "pnl": 704.17,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-20",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 40.2,
+      "qty": 158,
+      "pnl": 274.41,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-20",
+      "sym": "DELL",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 119.31,
+      "qty": 132,
+      "pnl": 767.71,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-20",
+      "sym": "KLAC",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 84.96,
+      "qty": 270,
+      "pnl": 2753.71,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-20",
+      "sym": "GLD",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 309.97,
+      "qty": 71,
+      "pnl": 738.35,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-23",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 40.87,
+      "qty": 405,
+      "pnl": -1304.5,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-23",
+      "sym": "OKLO",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 55.08,
+      "qty": 374,
+      "pnl": 9927.13,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-23",
+      "sym": "CSCO",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 67.35,
+      "qty": 191,
+      "pnl": 676.95,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-24",
+      "sym": "AVGO",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 263.64,
+      "qty": 48,
+      "pnl": 505.08,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-24",
+      "sym": "CEG",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 320.5,
+      "qty": 17,
+      "pnl": 210.47,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-24",
+      "sym": "INTC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 22.54,
+      "qty": 374,
+      "pnl": 643.86,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-24",
+      "sym": "INTC",
+      "bucket": "longterm",
+      "side": "SELL_PARTIAL",
+      "price": 22.54,
+      "qty": 523,
+      "pnl": 900.38,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-24",
+      "sym": "MSFT",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 489.86,
+      "qty": 83,
+      "pnl": 288.42,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-25",
+      "sym": "OKLO",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 55.54,
+      "qty": 226,
+      "pnl": -1178.55,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-25",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 26.22,
+      "qty": 176,
+      "pnl": 483.52,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-25",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 159.42,
+      "qty": 88,
+      "pnl": -984.09,
+      "reason": "stop_loss"
+    },
+    {
+      "date": "2025-06-25",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 26.22,
+      "qty": 246,
+      "pnl": 675.83,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "CSCO",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 68.92,
+      "qty": 268,
+      "pnl": 1370.28,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 5.45,
+      "qty": 814,
+      "pnl": 303.71,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 36.12,
+      "qty": 126,
+      "pnl": 417.65,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 49.25,
+      "qty": 88,
+      "pnl": 228.56,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "DELL",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 125.92,
+      "qty": 185,
+      "pnl": 2297.83,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "DELL",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 125.92,
+      "qty": 123,
+      "pnl": 1527.75,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "VST",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 190.3,
+      "qty": 46,
+      "pnl": 653.91,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 36.12,
+      "qty": 176,
+      "pnl": 583.39,
+      "reason": "profit_take2"
+    },
+    {
+      "date": "2025-06-26",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL_PARTIAL",
+      "price": 44.44,
+      "qty": 98,
+      "pnl": 234.56,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-27",
+      "sym": "META",
+      "bucket": "conservative",
+      "side": "SELL_PARTIAL",
+      "price": 733.26,
+      "qty": 17,
+      "pnl": 519.73,
+      "reason": "profit_take1"
+    },
+    {
+      "date": "2025-06-27",
+      "sym": "MP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 32.88,
+      "qty": 394,
+      "pnl": 2264.79,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "CRWV",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 162.98,
+      "qty": 158,
+      "pnl": -33.49,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "LRCX",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 97.29,
+      "qty": 144,
+      "pnl": 1585.78,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "GLW",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 52.56,
+      "qty": 221,
+      "pnl": 1674.19,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "ASTS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 46.71,
+      "qty": 304,
+      "pnl": 3533.03,
+      "reason": "trailing_stop"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "CIEN",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 81.29,
+      "qty": 318,
+      "pnl": -90.89,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "TSM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 226.38,
+      "qty": 89,
+      "pnl": 4711.96,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "SNDK",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 45.33,
+      "qty": 355,
+      "pnl": 562.34,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "ARM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 161.66,
+      "qty": 100,
+      "pnl": 2883.25,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "TSLA",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 317.5,
+      "qty": 41,
+      "pnl": -422.62,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "QCOM",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 159.18,
+      "qty": 102,
+      "pnl": 848.11,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "WDC",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 63.96,
+      "qty": 472,
+      "pnl": 9996.77,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "ENTG",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 80.61,
+      "qty": 310,
+      "pnl": -367.47,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "STX",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 144.26,
+      "qty": 227,
+      "pnl": 12617.72,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "MPWR",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 731.01,
+      "qty": 28,
+      "pnl": 1190.43,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "INTC",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 22.39,
+      "qty": 693,
+      "pnl": 486.88,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "GLD",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 304.68,
+      "qty": 83,
+      "pnl": -551.9,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AAOI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 25.68,
+      "qty": 321,
+      "pnl": 272.0,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "NXPI",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 218.38,
+      "qty": 99,
+      "pnl": 1696.23,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "GOOGL",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 176.14,
+      "qty": 234,
+      "pnl": 576.17,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "ADI",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 237.9,
+      "qty": 139,
+      "pnl": 2244.9,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AVAV",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 284.81,
+      "qty": 55,
+      "pnl": 7421.86,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "TER",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 89.88,
+      "qty": 246,
+      "pnl": 2024.79,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "NET",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 195.73,
+      "qty": 62,
+      "pnl": 4453.55,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "META",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 737.72,
+      "qty": 56,
+      "pnl": 1457.19,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "CEG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 322.6,
+      "qty": 40,
+      "pnl": 579.16,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "NRG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 160.5,
+      "qty": 85,
+      "pnl": -99.38,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "CSCO",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 69.35,
+      "qty": 355,
+      "pnl": 1099.9,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "VST",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 193.71,
+      "qty": 45,
+      "pnl": 590.54,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "INTU",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 787.24,
+      "qty": 52,
+      "pnl": 963.87,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "SAP",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 303.95,
+      "qty": 136,
+      "pnl": 901.44,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "RKLB",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 35.75,
+      "qty": 231,
+      "pnl": 297.06,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "FCX",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 43.33,
+      "qty": 323,
+      "pnl": 239.91,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "NVDA",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 157.91,
+      "qty": 136,
+      "pnl": 5919.77,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "KTOS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 46.43,
+      "qty": 289,
+      "pnl": 2728.57,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AMD",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 141.83,
+      "qty": 119,
+      "pnl": 2688.27,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "SMCI",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 48.99,
+      "qty": 291,
+      "pnl": 478.51,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "COHR",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 89.17,
+      "qty": 270,
+      "pnl": 3889.0,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "ZS",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 313.78,
+      "qty": 48,
+      "pnl": 4748.06,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "PANW",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 204.54,
+      "qty": 89,
+      "pnl": 464.3,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "CRWD",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 509.06,
+      "qty": 33,
+      "pnl": 950.08,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "LITE",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 95.01,
+      "qty": 102,
+      "pnl": 1436.1,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "MU",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 123.19,
+      "qty": 154,
+      "pnl": 3460.25,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AMAT",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 182.98,
+      "qty": 123,
+      "pnl": 2469.78,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AMZN",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 219.28,
+      "qty": 240,
+      "pnl": 339.76,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "CCJ",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 74.19,
+      "qty": 186,
+      "pnl": 5570.95,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "MRVL",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 77.36,
+      "qty": 220,
+      "pnl": 3591.4,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AEP",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 103.71,
+      "qty": 132,
+      "pnl": -17.8,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "KLAC",
+      "bucket": "longterm",
+      "side": "SELL",
+      "price": 89.53,
+      "qty": 291,
+      "pnl": 161.48,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AXON",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 827.53,
+      "qty": 10,
+      "pnl": 2362.98,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "ORCL",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 218.52,
+      "qty": 185,
+      "pnl": -52.57,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "AVGO",
+      "bucket": "conservative",
+      "side": "SELL",
+      "price": 275.51,
+      "qty": 158,
+      "pnl": 3038.29,
+      "reason": "rsi_overbought"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "POET",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 5.21,
+      "qty": 1898,
+      "pnl": 253.0,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "DDOG",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 134.26,
+      "qty": 63,
+      "pnl": 743.52,
+      "reason": "end_of_backtest"
+    },
+    {
+      "date": "2025-06-30",
+      "sym": "FN",
+      "bucket": "shortterm",
+      "side": "SELL",
+      "price": 294.53,
+      "qty": 29,
+      "pnl": 2146.39,
+      "reason": "end_of_backtest"
+    }
+  ]
+};
+
+// KPI 卡片
+const kpis = [
+  {val: '$' + D.total_pnl.toLocaleString(), lbl: '总盈亏', cls: D.total_pnl >= 0 ? 'green' : 'red'},
+  {val: D.ret_pct + '%', lbl: '总收益率', cls: D.ret_pct >= 0 ? 'green' : 'red'},
+  {val: D.win_rate + '%', lbl: '胜率', cls: 'blue'},
+  {val: D.trade_cnt, lbl: '交易笔数', cls: 'yellow'},
+  {val: D.best_stock, lbl: '最佳: $' + D.best_pnl.toLocaleString(), cls: 'purple'},
+];
+const kRow = document.getElementById('kpiRow');
+kpis.forEach(k => {
+  kRow.innerHTML += `<div class="kpi"><div class="val ${k.cls}">${k.val}</div><div class="lbl">${k.lbl}</div></div>`;
+});
+
+// 权益曲线
+new Chart(document.getElementById('eqChart'), {
+  type: 'line',
+  data: {
+    labels: D.equity_dates,
+    datasets: [{
+      label: '累计盈亏 ($)',
+      data: D.equity_vals,
+      borderColor: '#4ECDC4',
+      backgroundColor: 'rgba(78,205,196,0.08)',
+      fill: true,
+      tension: 0.3,
+      pointRadius: 0,
+    }]
+  },
+  options: {plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#666',maxTicksLimit:8}},y:{ticks:{color:'#666',callback:v=>'$'+v.toLocaleString()}}}}
+});
+
+// 桶卡片
+const bColors = {'保守':'#4ECDC4','成长':'#45B7D1','短线':'#FF6B6B'};
+const bCards = document.getElementById('bucketCards');
+D.bucket_data.forEach(b => {
+  const c = bColors[b.name] || '#aaa';
+  const pnlCls = b.total_pnl >= 0 ? 'green' : 'red';
+  bCards.innerHTML += `<div class="bucket-card">
+    <div class="name" style="color:${c}">${b.name}桶</div>
+    <div class="row"><span class="k">总盈亏</span><span class="${pnlCls}">$${b.total_pnl.toLocaleString()}</span></div>
+    <div class="row"><span class="k">年化收益</span><span class="${pnlCls}">${b.ann_ret}%</span></div>
+    <div class="row"><span class="k">胜率</span><span>${b.win_rate}%</span></div>
+    <div class="row"><span class="k">利润因子</span><span>${b.profit_factor}</span></div>
+    <div class="row"><span class="k">Sharpe</span><span>${b.sharpe}</span></div>
+  </div>`;
+});
+
+// Top/Bot 股票条形图
+function hbar(id, items, title) {
+  new Chart(document.getElementById(id), {
+    type: 'bar',
+    data: {
+      labels: items.map(s=>s.sym),
+      datasets: [{
+        label: title,
+        data: items.map(s=>s.pnl),
+        backgroundColor: items.map(s=>s.color),
+      }]
+    },
+    options: {
+      indexAxis:'y',
+      plugins:{legend:{display:false},title:{display:true,text:title,color:'#aaa'}},
+      scales:{x:{ticks:{color:'#666',callback:v=>'$'+v.toLocaleString()}},y:{ticks:{color:'#ccc'}}}
+    }
+  });
+}
+hbar('topChart', D.top_stocks, '盈利最多的股票');
+hbar('botChart', [...D.bot_stocks].reverse(), '亏损最多的股票');
+
+// 信号饼图
+function donut(id, countObj, title) {
+  const keys = Object.keys(countObj), vals = Object.values(countObj);
+  const palette = ['#4ECDC4','#45B7D1','#FF6B6B','#FBBF24','#A78BFA','#F97316','#10B981','#EC4899','#6366F1','#84CC16'];
+  new Chart(document.getElementById(id), {
+    type: 'doughnut',
+    data: {labels: keys, datasets:[{data: vals, backgroundColor: palette.slice(0,keys.length), borderWidth:0}]},
+    options: {plugins:{legend:{position:'right',labels:{color:'#aaa',boxWidth:12}},title:{display:true,text:title,color:'#aaa'}}}
+  });
+}
+donut('entryChart', D.signal_cnt,      '买入信号分布');
+donut('exitChart',  D.sell_reason_cnt, '卖出原因分布');
+
+// 交易明细表格
+const tbody = document.getElementById('tradeBody');
+function renderTable(rows) {
+  tbody.innerHTML = '';
+  rows.forEach(r => {
+    const pnlCls = r.pnl >= 0 ? 'green' : 'red';
+    const tag = `<span class="tag tag-${r.bucket}">${{conservative:'保守',longterm:'成长',shortterm:'短线'}[r.bucket]||r.bucket}</span>`;
+    tbody.innerHTML += `<tr>
+      <td>${r.date}</td>
+      <td><b>${r.sym}</b></td>
+      <td>${tag}</td>
+      <td>${r.side}</td>
+      <td>$${r.price}</td>
+      <td>${r.qty}</td>
+      <td class="${pnlCls}">${r.pnl >= 0 ? '+' : ''}$${r.pnl.toLocaleString()}</td>
+      <td>${r.reason}</td>
+    </tr>`;
+  });
+}
+renderTable(D.trades);
+document.getElementById('filterInput').addEventListener('input', function() {
+  const q = this.value.toLowerCase();
+  renderTable(D.trades.filter(r =>
+    r.sym.toLowerCase().includes(q) ||
+    r.bucket.toLowerCase().includes(q) ||
+    r.reason.toLowerCase().includes(q) ||
+    r.side.toLowerCase().includes(q)
+  ));
+});
+</script>
+</body>
+</html>

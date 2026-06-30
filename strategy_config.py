@@ -110,6 +110,7 @@ BUCKETS: dict[str, dict] = {
         ],
         'max_pos': 6,
         'alloc': 0.05,   # 原 0.18 → 单桶上限 $50k，每笔更小
+        'position_pct': 0.65,          # 每只股票用 per-stock 分配额的 65% 建仓（Vibe-Trading 权重式）
         'stop_loss': 0.06,             # 原 0.08，更快止损
         'fast_ma': 10,
         'slow_ma': 50,
@@ -144,6 +145,7 @@ BUCKETS: dict[str, dict] = {
         ],
         'max_pos': 10,      # 持仓数多，但每笔更小
         'alloc': 0.04,   # 原 0.10 → 单桶上限 $40k
+        'position_pct': 0.70,          # 成长股适当激进（Vibe-Trading 权重式）
         'stop_loss': 0.05,             # 原 0.07
         'fast_ma': 5,
         'slow_ma': 20,
@@ -187,6 +189,7 @@ BUCKETS: dict[str, dict] = {
         ],
         'max_pos': 10,      # 短线分散更多
         'alloc': 0.03,   # 原 0.06 → 单桶上限 $30k
+        'position_pct': 0.55,          # 短线波动大，仓位相对保守（Vibe-Trading 权重式）
         'stop_loss': 0.04,             # 短线更快止损（原 0.05）
         'fast_ma': 5,
         'slow_ma': 20,

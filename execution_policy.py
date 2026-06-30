@@ -236,3 +236,26 @@ def cash_position_qty(price: float, budget: float) -> int:
     if price <= 0 or budget < price:
         return 0
     return max(1, int(budget / price))
+
+
+def equity_pct_qty(price: float, equity: float, pct: float) -> int:
+    """Vibe-Trading 权重式仓位：按参考资金的固定比例分配。
+
+    取代 ATR/$200 风险公式，直接把 equity*pct 换成股数。
+    回测中 equity = per_stock_cash（每只股票的分配额），
+    实盘中 equity = 桶的总资金。
+
+    Args:
+        price:  当前成交价
+        equity: 参考资金（per-stock 分配额 或 桶总资金）
+        pct:    仓位比例，如 0.60 = 用 60% 的分配额买入
+
+    Returns:
+        整数股数，最小 1 股；资金不足时返回 0。
+    """
+    if price <= 0 or equity <= 0 or pct <= 0:
+        return 0
+    target_value = equity * min(pct, 1.0)
+    if target_value < price:
+        return 0
+    return int(target_value / price)

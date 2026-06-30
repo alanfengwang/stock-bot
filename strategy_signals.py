@@ -57,12 +57,64 @@ def calc_atr_value(df: pd.DataFrame, period: int = 14) -> float:
     return value if value == value else close * 0.02
 
 
+def calc_adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Wilder EWM ADX（趋势强度）。
+
+    ADX > 20：趋势初步确立；ADX > 25：趋势明确；ADX > 40：强趋势。
+    Vibe-Trading 的 technical-basic 信号引擎用 ADX 过滤震荡行情中的假金叉。
+
+    Args:
+        df: 需要包含 high/low/close 列。
+        period: ADX 周期，默认 14。
+
+    Returns:
+        ADX Series（0-100），前 period*2 根为 NaN。
+    """
+    if not {'high', 'low', 'close'}.issubset(df.columns):
+        return pd.Series(float('nan'), index=df.index)
+
+    h, l, c = df['high'], df['low'], df['close']
+    prev_h, prev_l, prev_c = h.shift(1), l.shift(1), c.shift(1)
+
+    up_move   = h - prev_h
+    down_move = prev_l - l
+
+    import numpy as np
+    plus_dm  = pd.Series(0.0, index=df.index)
+    minus_dm = pd.Series(0.0, index=df.index)
+    mask_plus  = (up_move > down_move) & (up_move > 0)
+    mask_minus = (down_move > up_move) & (down_move > 0)
+    plus_dm[mask_plus]   = up_move[mask_plus]
+    minus_dm[mask_minus] = down_move[mask_minus]
+
+    tr = pd.concat([
+        (h - l),
+        (h - prev_c).abs(),
+        (l - prev_c).abs(),
+    ], axis=1).max(axis=1)
+
+    alpha = 1.0 / period
+    s_tr      = tr.ewm(alpha=alpha, min_periods=period).mean()
+    s_plus    = plus_dm.ewm(alpha=alpha, min_periods=period).mean()
+    s_minus   = minus_dm.ewm(alpha=alpha, min_periods=period).mean()
+
+    plus_di  = 100 * s_plus  / s_tr.replace(0, float('nan'))
+    minus_di = 100 * s_minus / s_tr.replace(0, float('nan'))
+
+    di_sum = (plus_di + minus_di).replace(0, float('nan'))
+    dx  = 100 * (plus_di - minus_di).abs() / di_sum
+    adx = dx.ewm(alpha=alpha, min_periods=period).mean()
+    return adx
+
+
 def enrich_indicators(df: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     out = df.copy()
     out['fast_ma'] = out['close'].rolling(cfg['fast_ma']).mean()
     out['slow_ma_v'] = out['close'].rolling(cfg['slow_ma']).mean()
     if 'high' in out.columns and 'low' in out.columns:
         out['atr'] = calc_atr_series(out)
+        # ADX：趋势强度过滤器（Vibe-Trading 三维度信号第一维）
+        out['adx'] = calc_adx(out, period=cfg.get('adx_period', 14))
     if 'rsi_period' in cfg:
         out['rsi'] = calc_rsi(out['close'], cfg['rsi_period'])
     if 'macd_fast' in cfg:
@@ -153,9 +205,16 @@ def detect_entry_signal(cfg: dict,
     price = float(latest['close'])
     ma_golden = fast_prev < slow_prev and fast_now > slow_now
 
-    # 金叉是最基础信号，不要求附加指标确认
-    if 'golden_cross' in entry_modes and ma_golden:
-        return 'golden_cross', '新金叉'
+    # ADX 趋势强度过滤：ADX < adx_min 时为震荡行情，跳过金叉（防假金叉）
+    # Vibe-Trading: EMA 金叉 + ADX 确认 = 更高质量的趋势信号
+    adx_min = float(cfg.get('adx_min', 18.0))
+    adx_now = float(latest.get('adx', float('nan')))
+    adx_ok = (adx_now != adx_now) or (adx_now >= adx_min)  # NaN（数据不足）时放行
+
+    # 金叉 + ADX 确认
+    if 'golden_cross' in entry_modes and ma_golden and adx_ok:
+        adx_note = f" ADX={adx_now:.0f}" if adx_now == adx_now else ""
+        return 'golden_cross', f"新金叉{adx_note}"
 
     if fast_now <= slow_now:
         return None
